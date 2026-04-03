@@ -1,0 +1,6 @@
+node_modules/
+sessions/
+*.sanitized.jsonl
+*.sample.json
+*.zip
+.DS_Store
