@@ -23,6 +23,9 @@ oclaw-cost-debugger scan --sort cost
 # Deep-dive into a specific session
 oclaw-cost-debugger inspect 21fd        # by ID prefix
 oclaw-cost-debugger inspect --rank 1 --sort cost   # the most expensive one
+
+# Check if a session is getting healthier over time
+oclaw-cost-debugger validate 21fd
 ```
 
 ## Commands
@@ -66,6 +69,30 @@ oclaw-cost-debugger find --model gpt-5
 oclaw-cost-debugger find --min-tokens 50000
 oclaw-cost-debugger find --after 2026-03-01
 ```
+
+### `validate` — check if a session is getting healthier
+
+Compares recent turns against older turns within the same session to see whether token burn, context growth, and error patterns are improving. Designed for long-lived sessions (WhatsApp owner chats, persistent main sessions) where you don't get a clean "new session" boundary.
+
+```bash
+oclaw-cost-debugger validate <session-id>              # by full or prefix ID
+oclaw-cost-debugger validate --rank 1 --sort cost      # validate the costliest
+oclaw-cost-debugger validate 21fd --strategy halves    # split at midpoint
+oclaw-cost-debugger validate 21fd --strategy time-24h  # last 24h vs prior 24h
+oclaw-cost-debugger validate 21fd --format json        # for scripting
+```
+
+Produces a verdict:
+
+| Verdict | Meaning |
+|---------|---------|
+| `likely_improved` | Key metrics trending down — the fix appears to be working |
+| `no_clear_improvement` | Metrics are flat — changes may not have taken effect |
+| `still_recurring` | The diagnosed pattern (bloat, looping, etc.) is still active |
+| `worse` | Key metrics have worsened since the baseline |
+| `insufficient_data` | Not enough turns to compare — check back later |
+
+Each verdict includes confidence level, evidence, and actionable guidance.
 
 ### `report` — full diagnostic report
 
