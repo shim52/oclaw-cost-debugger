@@ -321,14 +321,71 @@ function compareMetric(id, label, baselineVal, recentVal, direction) {
 }
 
 /**
+ * Diagnosis-specific metric classification.
+ *
+ * Burden metrics = what the user actually feels (cost, context size, cache-read).
+ * Process metrics = internal efficiency signals (slope, retry rate, input tokens).
+ *
+ * The verdict depends primarily on burden metrics. Process metrics can only
+ * upgrade "no_clear_improvement" to "mixed_signals" — never to "likely_improved".
+ */
+const DIAGNOSIS_METRIC_PROFILES = {
+  context_bloat: {
+    burden: ['avg_cache_read_per_turn', 'avg_context_size', 'avg_cost_per_turn', 'peak_context'],
+    process: ['context_growth_slope', 'avg_input_tokens_per_turn', 'retry_rate', 'tool_error_rate'],
+  },
+  stale_scheduled_session: {
+    burden: ['avg_cache_read_per_turn', 'avg_context_size', 'avg_cost_per_turn', 'peak_context'],
+    process: ['context_growth_slope', 'avg_input_tokens_per_turn', 'retry_rate', 'tool_error_rate'],
+  },
+  retry_churn: {
+    burden: ['retry_rate', 'tool_error_rate', 'avg_cost_per_turn'],
+    process: ['avg_cache_read_per_turn', 'avg_context_size', 'context_growth_slope', 'avg_input_tokens_per_turn', 'peak_context'],
+  },
+  tool_failure_cascade: {
+    burden: ['tool_error_rate', 'retry_rate', 'avg_cost_per_turn'],
+    process: ['avg_cache_read_per_turn', 'avg_context_size', 'context_growth_slope', 'avg_input_tokens_per_turn', 'peak_context'],
+  },
+  looping_or_indecision: {
+    burden: ['retry_rate', 'avg_cost_per_turn', 'avg_context_size'],
+    process: ['tool_error_rate', 'avg_cache_read_per_turn', 'context_growth_slope', 'avg_input_tokens_per_turn', 'peak_context'],
+  },
+  overpowered_simple_task: {
+    burden: ['avg_cost_per_turn', 'avg_input_tokens_per_turn', 'avg_context_size'],
+    process: ['avg_cache_read_per_turn', 'peak_context', 'context_growth_slope', 'retry_rate', 'tool_error_rate'],
+  },
+  relay_workflow: {
+    burden: ['avg_cost_per_turn', 'avg_cache_read_per_turn', 'avg_context_size'],
+    process: ['peak_context', 'context_growth_slope', 'avg_input_tokens_per_turn', 'retry_rate', 'tool_error_rate'],
+  },
+  // Default profile when diagnosis doesn't match a specific pattern
+  _default: {
+    burden: ['avg_cache_read_per_turn', 'avg_context_size', 'avg_cost_per_turn', 'peak_context'],
+    process: ['context_growth_slope', 'avg_input_tokens_per_turn', 'retry_rate', 'tool_error_rate'],
+  },
+};
+
+function getMetricProfile(diagnosisLabels) {
+  const diagLabels = diagnosisLabels.map(l => typeof l === 'string' ? l : l.label);
+  // Use the primary (highest-confidence) diagnosis
+  for (const label of diagLabels) {
+    if (DIAGNOSIS_METRIC_PROFILES[label]) {
+      return DIAGNOSIS_METRIC_PROFILES[label];
+    }
+  }
+  return DIAGNOSIS_METRIC_PROFILES._default;
+}
+
+/**
  * Produce an overall verdict from metric comparisons and diagnosis context.
  *
  * Verdicts:
- *   - likely_improved
- *   - no_clear_improvement
- *   - still_recurring
- *   - worse
- *   - insufficient_data
+ *   - likely_improved   — burden metrics clearly better, no major worsening
+ *   - mixed_signals     — some burden metrics improve, others worsen
+ *   - no_clear_improvement — burden metrics flat, pathology may still be active
+ *   - still_recurring   — diagnosed pattern is clearly still active
+ *   - worse             — burden metrics materially worse
+ *   - insufficient_data — not enough turns to judge
  */
 export function computeVerdict(metricComparisons, baselineAgg, recentAgg, diagnosisLabels = []) {
   if (baselineAgg.turnCount < 2 || recentAgg.turnCount < 2) {
@@ -339,79 +396,106 @@ export function computeVerdict(metricComparisons, baselineAgg, recentAgg, diagno
     };
   }
 
-  const improved = metricComparisons.filter(m => m.trend === 'improved');
-  const worsened = metricComparisons.filter(m => m.trend === 'worsened');
-  const flat = metricComparisons.filter(m => m.trend === 'flat');
+  const profile = getMetricProfile(diagnosisLabels);
+  const byId = new Map(metricComparisons.map(m => [m.id, m]));
 
-  // Key metrics that matter most
-  const keyMetricIds = ['avg_input_tokens_per_turn', 'avg_cache_read_per_turn', 'avg_cost_per_turn', 'context_growth_slope'];
-  const keyImproved = improved.filter(m => keyMetricIds.includes(m.id));
-  const keyWorsened = worsened.filter(m => keyMetricIds.includes(m.id));
+  const burdenMetrics = profile.burden.map(id => byId.get(id)).filter(Boolean);
+  const processMetrics = profile.process.map(id => byId.get(id)).filter(Boolean);
 
-  // Check if diagnosed patterns are still present
-  const contextStillGrowing = metricComparisons.find(m => m.id === 'context_growth_slope')?.trend !== 'improved'
-    && recentAgg.contextGrowthSlope > 500;
+  const burdenImproved = burdenMetrics.filter(m => m.trend === 'improved');
+  const burdenWorsened = burdenMetrics.filter(m => m.trend === 'worsened');
+  const burdenFlat = burdenMetrics.filter(m => m.trend === 'flat');
 
-  const retriesStillHigh = recentAgg.retryRate > 0.2;
+  const processImproved = processMetrics.filter(m => m.trend === 'improved');
+  const processWorsened = processMetrics.filter(m => m.trend === 'worsened');
 
+  // Check if diagnosed patterns are still actively present
   const diagLabels = diagnosisLabels.map(l => typeof l === 'string' ? l : l.label);
   const hadContextBloat = diagLabels.includes('context_bloat') || diagLabels.includes('stale_scheduled_session');
   const hadLooping = diagLabels.includes('looping_or_indecision') || diagLabels.includes('retry_churn');
+  const hadFailureCascade = diagLabels.includes('tool_failure_cascade');
 
-  // Determine verdict
-  if (keyWorsened.length >= 3) {
-    return {
-      verdict: 'worse',
-      confidence: 'high',
-      reason: `${keyWorsened.length} key metrics worsened: ${keyWorsened.map(m => m.label).join(', ')}.`,
-    };
-  }
+  const contextStillGrowing = byId.get('context_growth_slope')?.trend !== 'improved'
+    && recentAgg.contextGrowthSlope > 500;
+  const retriesStillHigh = recentAgg.retryRate > 0.2;
+  const errorsStillHigh = recentAgg.toolErrorRate > 0.3;
 
-  if (hadContextBloat && contextStillGrowing) {
+  // ─── still_recurring: diagnosed pathology clearly still active ───
+  if (hadContextBloat && contextStillGrowing && burdenWorsened.length > 0) {
     return {
       verdict: 'still_recurring',
       confidence: 'medium',
-      reason: 'Context is still growing at a significant rate; the bloat pattern has not been resolved.',
+      reason: `Context is still growing and ${burdenWorsened.map(m => m.label).join(', ')} worsened — the bloat pattern is still active.`,
     };
   }
 
-  if (hadLooping && retriesStillHigh) {
+  if (hadLooping && retriesStillHigh && burdenImproved.length === 0) {
     return {
       verdict: 'still_recurring',
       confidence: 'medium',
-      reason: `Retry rate is still ${(recentAgg.retryRate * 100).toFixed(0)}% — looping/retry pattern persists.`,
+      reason: `Retry rate is still ${(recentAgg.retryRate * 100).toFixed(0)}% and no burden metrics improved — looping pattern persists.`,
     };
   }
 
-  if (keyImproved.length >= 2 && keyWorsened.length === 0) {
-    const avgImprovement = keyImproved.reduce((s, m) => s + Math.abs(m.pctChange), 0) / keyImproved.length;
+  if (hadFailureCascade && errorsStillHigh && burdenImproved.length === 0) {
     return {
-      verdict: 'likely_improved',
-      confidence: avgImprovement > 30 ? 'high' : 'medium',
-      reason: `${keyImproved.length} key metrics improved: ${keyImproved.map(m => `${m.label} (${m.pctChange > 0 ? '+' : ''}${m.pctChange.toFixed(0)}%)`).join(', ')}.`,
+      verdict: 'still_recurring',
+      confidence: 'medium',
+      reason: `Tool error rate is still ${(recentAgg.toolErrorRate * 100).toFixed(0)}% — failure cascade persists.`,
     };
   }
 
-  if (keyImproved.length > keyWorsened.length) {
-    return {
-      verdict: 'likely_improved',
-      confidence: 'low',
-      reason: `Mixed signals — ${keyImproved.length} key metrics improved but ${keyWorsened.length} worsened.`,
-    };
-  }
-
-  if (keyWorsened.length > keyImproved.length) {
+  // ─── worse: majority of burden metrics worsened ───
+  if (burdenWorsened.length >= Math.ceil(burdenMetrics.length / 2)) {
     return {
       verdict: 'worse',
-      confidence: 'low',
-      reason: `More key metrics worsened (${keyWorsened.length}) than improved (${keyImproved.length}).`,
+      confidence: burdenWorsened.length >= 3 ? 'high' : 'medium',
+      reason: `${burdenWorsened.length} of ${burdenMetrics.length} burden metrics worsened: ${burdenWorsened.map(m => m.label).join(', ')}.`,
     };
   }
 
+  // ─── likely_improved: burden clearly better, no burden worsening ───
+  if (burdenImproved.length >= Math.ceil(burdenMetrics.length / 2) && burdenWorsened.length === 0) {
+    const avgImprovement = burdenImproved.reduce((s, m) => s + Math.abs(m.pctChange), 0) / burdenImproved.length;
+    const confidence = avgImprovement > 30 ? 'high' : 'medium';
+    return {
+      verdict: 'likely_improved',
+      confidence,
+      reason: `${burdenImproved.length} of ${burdenMetrics.length} burden metrics improved with no worsening: ${burdenImproved.map(m => `${m.label} (${m.pctChange > 0 ? '+' : ''}${m.pctChange.toFixed(0)}%)`).join(', ')}.`,
+    };
+  }
+
+  // ─── mixed_signals: some burden improved, some worsened ───
+  if (burdenImproved.length > 0 && burdenWorsened.length > 0) {
+    return {
+      verdict: 'mixed_signals',
+      confidence: 'low',
+      reason: `Mixed burden signals — ${burdenImproved.map(m => m.label).join(', ')} improved but ${burdenWorsened.map(m => m.label).join(', ')} worsened. No clear practical improvement.`,
+    };
+  }
+
+  // ─── process-only improvement: not enough to claim "improved" ───
+  if (burdenImproved.length === 0 && processImproved.length > 0 && burdenWorsened.length === 0) {
+    // Process metrics improved but burden is flat — cautious signal
+    if (processImproved.length >= 2) {
+      return {
+        verdict: 'mixed_signals',
+        confidence: 'low',
+        reason: `Some efficiency metrics improved (${processImproved.map(m => m.label).join(', ')}), but the main cost burden (${burdenFlat.map(m => m.label).join(', ')}) remains unchanged.`,
+      };
+    }
+    return {
+      verdict: 'no_clear_improvement',
+      confidence: 'low',
+      reason: `Burden metrics are flat. Minor process improvement in ${processImproved.map(m => m.label).join(', ')} does not indicate practical cost reduction.`,
+    };
+  }
+
+  // ─── all flat or minimal movement ───
   return {
     verdict: 'no_clear_improvement',
     confidence: 'low',
-    reason: 'Metrics are mostly flat — no significant change detected.',
+    reason: 'Burden metrics are mostly flat — no significant practical change detected.',
   };
 }
 

@@ -124,26 +124,30 @@ describe('trend analysis', () => {
 
       assert.ok(result.verdict, 'Should have a verdict');
       assert.ok(
-        ['likely_improved', 'no_clear_improvement', 'still_recurring', 'worse', 'insufficient_data']
+        ['likely_improved', 'mixed_signals', 'no_clear_improvement', 'still_recurring', 'worse', 'insufficient_data']
           .includes(result.verdict.verdict),
         `Unexpected verdict: ${result.verdict.verdict}`
       );
       assert.ok(result.strategy, 'Should report strategy used');
     });
 
-    it('detects improving pattern in long-lived session', async () => {
+    it('detects partial improvement but stays conservative in long-lived session', async () => {
       const { events } = await parseTranscript(join(FIXTURES_DIR, 'sess-006-long-lived.jsonl'));
       const result = validateImpact(events, {
         diagnosisLabels: ['context_bloat'],
       });
 
-      // sess-006 has high context early, lower later (after implied reset at day boundary)
+      // sess-006 has lower avg context in recent half, but peak context still grew
       assert.ok(result.baselineWindow, 'Should have baseline');
       assert.ok(result.recentWindow, 'Should have recent');
-      // The recent window should show lower avg context than baseline
       assert.ok(
         result.recentWindow.avgContextSize < result.baselineWindow.avgContextSize,
         `Recent avg context (${result.recentWindow.avgContextSize}) should be less than baseline (${result.baselineWindow.avgContextSize})`
+      );
+      // Verdict should be conservative — mixed_signals, not likely_improved — because peak context worsened
+      assert.ok(
+        ['mixed_signals', 'no_clear_improvement'].includes(result.verdict.verdict),
+        `Expected conservative verdict when burden signals are mixed, got: ${result.verdict.verdict}`
       );
     });
 
@@ -156,6 +160,43 @@ describe('trend analysis', () => {
       // sess-007 shows steadily growing context with persistent errors
       assert.ok(result.verdict.verdict !== 'likely_improved',
         `Should NOT report improvement for a worsening session, got: ${result.verdict.verdict}`);
+    });
+
+    it('produces mixed_signals when burden worsens but process improves', async () => {
+      const { events } = await parseTranscript(join(FIXTURES_DIR, 'sess-008-mixed-signals.jsonl'));
+      const result = validateImpact(events, {
+        diagnosisLabels: ['context_bloat'],
+      });
+
+      // sess-008: retries stop in later half (process improves) but cache-read/context keep growing (burden worsens)
+      assert.ok(
+        result.verdict.verdict !== 'likely_improved',
+        `Should NOT report likely_improved when burden metrics worsen, got: ${result.verdict.verdict}`
+      );
+      // Should be mixed_signals, worse, or no_clear_improvement — never likely_improved
+      assert.ok(
+        ['mixed_signals', 'worse', 'no_clear_improvement', 'still_recurring'].includes(result.verdict.verdict),
+        `Expected conservative verdict, got: ${result.verdict.verdict}`
+      );
+    });
+
+    it('never returns likely_improved when key burden metrics worsen', async () => {
+      // Synthetic test: simulate burden worsened, process improved
+      const fakeBaseline = aggregateWindow([
+        { inputTokens: 20000, outputTokens: 200, cacheRead: 30000, contextSize: 50000, cost: 0.10, modelTier: 'standard', toolCallCount: 1, toolErrors: 1, largeToolResults: 0, isRetry: true },
+        { inputTokens: 22000, outputTokens: 200, cacheRead: 32000, contextSize: 54000, cost: 0.11, modelTier: 'standard', toolCallCount: 1, toolErrors: 1, largeToolResults: 0, isRetry: true },
+        { inputTokens: 24000, outputTokens: 200, cacheRead: 34000, contextSize: 58000, cost: 0.12, modelTier: 'standard', toolCallCount: 1, toolErrors: 0, largeToolResults: 0, isRetry: false },
+      ]);
+      const fakeRecent = aggregateWindow([
+        { inputTokens: 18000, outputTokens: 200, cacheRead: 50000, contextSize: 68000, cost: 0.14, modelTier: 'standard', toolCallCount: 1, toolErrors: 0, largeToolResults: 0, isRetry: false },
+        { inputTokens: 17000, outputTokens: 200, cacheRead: 55000, contextSize: 72000, cost: 0.15, modelTier: 'standard', toolCallCount: 1, toolErrors: 0, largeToolResults: 0, isRetry: false },
+        { inputTokens: 16000, outputTokens: 200, cacheRead: 58000, contextSize: 74000, cost: 0.16, modelTier: 'standard', toolCallCount: 1, toolErrors: 0, largeToolResults: 0, isRetry: false },
+      ]);
+      const metrics = compareWindows(fakeBaseline, fakeRecent);
+      const verdict = computeVerdict(metrics, fakeBaseline, fakeRecent, ['context_bloat']);
+
+      assert.notEqual(verdict.verdict, 'likely_improved',
+        `Must not claim likely_improved when cache-read and context size worsened (got: ${verdict.verdict})`);
     });
 
     it('returns insufficient_data for very short sessions', async () => {

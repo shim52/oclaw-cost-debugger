@@ -590,6 +590,7 @@ function formatValidationMarkdown(sessionId, validation, analysis) {
 function colorVerdict(verdict) {
   switch (verdict) {
     case 'likely_improved': return chalk.green.bold('LIKELY IMPROVED');
+    case 'mixed_signals': return chalk.yellow('MIXED SIGNALS');
     case 'no_clear_improvement': return chalk.yellow.bold('NO CLEAR IMPROVEMENT');
     case 'still_recurring': return chalk.red('STILL RECURRING');
     case 'worse': return chalk.red.bold('WORSE');
@@ -601,6 +602,7 @@ function colorVerdict(verdict) {
 function verdictEmoji(verdict) {
   switch (verdict) {
     case 'likely_improved': return '✅';
+    case 'mixed_signals': return '⚖️';
     case 'no_clear_improvement': return '➖';
     case 'still_recurring': return '🔄';
     case 'worse': return '❌';
@@ -649,22 +651,30 @@ function getVerdictGuidance(verdict, validation, analysis) {
 
   switch (verdict) {
     case 'likely_improved':
-      return 'Token burn per turn is trending down. If this pattern holds, cost should decrease. Continue monitoring with periodic validate runs.';
+      return 'The main cost burden has materially decreased — cache-read, context size, and/or cost per turn are down with no worsening. Continue monitoring to confirm the trend holds.';
+    case 'mixed_signals':
+      if (topLabel === 'context_bloat' || topLabel === 'stale_scheduled_session') {
+        return 'Some efficiency metrics improved, but context burden and cache-read remain high or worsened. The main cost pathology is still active — this is not a practical improvement yet.';
+      }
+      return 'Some metrics improved but others worsened. The session is not clearly healthier — the applied changes may be helping in one area while another cost driver persists.';
     case 'no_clear_improvement':
       if (topLabel === 'context_bloat' || topLabel === 'stale_scheduled_session') {
-        return 'Context is not shrinking meaningfully. The session may need a harder reset, compaction threshold change, or idle-reset configuration.';
+        return 'Context burden is not shrinking. The session may need a harder reset, compaction threshold change, or idle-reset configuration.';
       }
-      return 'Metrics are mostly flat. The applied changes may not have taken effect yet, or the session needs a different intervention.';
+      return 'Burden metrics are flat. The applied changes have not produced a measurable cost reduction yet. A different intervention may be needed.';
     case 'still_recurring':
       if (topLabel === 'context_bloat') {
-        return 'Context continues to grow. The bloat pattern is active — consider forcing a session reset or lowering the context token budget.';
+        return 'Context continues to grow and cost burden is worsening. The bloat pattern is active — consider forcing a session reset or lowering the context token budget.';
       }
       if (topLabel === 'looping_or_indecision' || topLabel === 'retry_churn') {
-        return 'The agent is still retrying or looping. The root cause likely requires a prompt or tool fix, not just a cost optimization.';
+        return 'The agent is still retrying or looping with no cost improvement. The root cause likely requires a prompt or tool fix, not just a cost optimization.';
       }
-      return 'The diagnosed pattern is still active. The applied fix may not address the root cause.';
+      if (topLabel === 'tool_failure_cascade') {
+        return 'Tool errors are still cascading. Fix the failing tools before expecting cost improvement.';
+      }
+      return 'The diagnosed pattern is still active with no burden reduction. The applied fix may not address the root cause.';
     case 'worse':
-      return 'Key metrics have worsened. Investigate whether a recent change (model update, prompt change, new tool) is causing increased token burn.';
+      return 'The main cost burden has increased. Investigate whether a recent change (model update, prompt change, new tool) is causing higher token burn.';
     case 'insufficient_data':
       return 'Not enough turns to draw conclusions. Run validate again after more activity in this session.';
     default:

@@ -86,10 +86,11 @@ Produces a verdict:
 
 | Verdict | Meaning |
 |---------|---------|
-| `likely_improved` | Key metrics trending down — the fix appears to be working |
-| `no_clear_improvement` | Metrics are flat — changes may not have taken effect |
-| `still_recurring` | The diagnosed pattern (bloat, looping, etc.) is still active |
-| `worse` | Key metrics have worsened since the baseline |
+| `likely_improved` | Burden metrics (cost, context, cache-read) clearly better with no worsening |
+| `mixed_signals` | Some burden metrics improved, others worsened — no clear practical improvement |
+| `no_clear_improvement` | Burden metrics are flat — changes have not produced measurable cost reduction |
+| `still_recurring` | The diagnosed pattern (bloat, looping, etc.) is still active and burden is not decreasing |
+| `worse` | Burden metrics have materially worsened since the baseline |
 | `insufficient_data` | Not enough turns to compare — check back later |
 
 Each verdict includes confidence level, evidence, and actionable guidance.
