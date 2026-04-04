@@ -438,3 +438,236 @@ function colorLabel(label) {
   const colorFn = LABEL_COLORS[label] || chalk.white;
   return colorFn(label);
 }
+
+// ─── Impact Validation ─────────────────────────────────
+
+/**
+ * Format an impact validation result.
+ */
+export function formatValidation(sessionId, validation, analysis, format = 'text') {
+  switch (format) {
+    case 'json':
+      return JSON.stringify({ sessionId: sanitize(sessionId), validation, diagnosis: analysis }, null, 2);
+    case 'markdown':
+      return formatValidationMarkdown(sessionId, validation, analysis);
+    default:
+      return formatValidationText(sessionId, validation, analysis);
+  }
+}
+
+function formatValidationText(sessionId, validation, analysis) {
+  const lines = [
+    '',
+    chalk.bold.cyan(`Impact Validation: ${sanitize(sessionId)}`),
+    chalk.dim('─'.repeat(70)),
+    '',
+  ];
+
+  // Verdict banner
+  const v = validation.verdict;
+  lines.push(chalk.bold.white('  Verdict'));
+  lines.push(`  ${colorVerdict(v.verdict)}  ${chalk.dim(`[${v.confidence} confidence]`)}`);
+  lines.push(`  ${v.reason}`);
+  lines.push('');
+
+  // Strategy
+  lines.push(chalk.dim(`  Comparison strategy: ${validation.strategy}`));
+  lines.push('');
+
+  // Windows side-by-side
+  const bw = validation.baselineWindow;
+  const rw = validation.recentWindow;
+
+  if (bw && rw) {
+    lines.push(chalk.bold.white('  Window Comparison'));
+    lines.push(chalk.dim('  ' + '─'.repeat(66)));
+    lines.push(
+      '  ' +
+      padRight('', 30) +
+      padRight('Baseline', 18) +
+      padRight('Recent', 18) +
+      'Change'
+    );
+    lines.push(chalk.dim('  ' + '─'.repeat(66)));
+
+    for (const m of validation.metrics) {
+      const bVal = formatMetricValue(m.id, m.baselineVal);
+      const rVal = formatMetricValue(m.id, m.recentVal);
+      const change = formatChange(m.pctChange, m.trend);
+      lines.push(
+        '  ' +
+        padRight(m.label, 30) +
+        padRight(bVal, 18) +
+        padRight(rVal, 18) +
+        change
+      );
+    }
+    lines.push(chalk.dim('  ' + '─'.repeat(66)));
+    lines.push(
+      '  ' +
+      padRight('Turns in window', 30) +
+      padRight(String(bw.turnCount), 18) +
+      padRight(String(rw.turnCount), 18)
+    );
+    lines.push('');
+
+    // Frequency-based metrics
+    lines.push(chalk.bold.white('  Pattern Indicators'));
+    lines.push(
+      `  Large tool results:   ${colorFrequency(bw.largeToolResultFrequency)} → ${colorFrequency(rw.largeToolResultFrequency)}`
+    );
+    lines.push(
+      `  Premium model usage:  ${fmtPct(bw.premiumModelRate)} → ${fmtPct(rw.premiumModelRate)}`
+    );
+    lines.push('');
+  }
+
+  // Current diagnosis context
+  if (analysis && analysis.labels?.length > 0) {
+    lines.push(chalk.bold.white('  Active Diagnosis'));
+    const topLabel = analysis.labels[0];
+    lines.push(`  ${colorLabel(topLabel.label)} ${chalk.dim(`(${(topLabel.confidence * 100).toFixed(0)}% confidence)`)}`);
+    lines.push(chalk.dim(`  ${topLabel.evidence[0]}`));
+    lines.push('');
+  }
+
+  // Actionable guidance based on verdict
+  lines.push(chalk.bold.white('  What This Means'));
+  lines.push(`  ${getVerdictGuidance(v.verdict, validation, analysis)}`);
+  lines.push('');
+
+  return lines.join('\n');
+}
+
+function formatValidationMarkdown(sessionId, validation, analysis) {
+  const lines = [
+    `# Impact Validation: ${sanitize(sessionId)}`,
+    '',
+  ];
+
+  const v = validation.verdict;
+  lines.push(`## Verdict: ${verdictEmoji(v.verdict)} ${v.verdict.replace(/_/g, ' ')}`);
+  lines.push(`**Confidence:** ${v.confidence}`);
+  lines.push(`> ${v.reason}`);
+  lines.push('');
+  lines.push(`_Comparison strategy: ${validation.strategy}_`);
+  lines.push('');
+
+  const bw = validation.baselineWindow;
+  const rw = validation.recentWindow;
+
+  if (bw && rw) {
+    lines.push('## Window Comparison');
+    lines.push('| Metric | Baseline | Recent | Change |');
+    lines.push('|--------|----------|--------|--------|');
+
+    for (const m of validation.metrics) {
+      const bVal = formatMetricValue(m.id, m.baselineVal);
+      const rVal = formatMetricValue(m.id, m.recentVal);
+      const change = `${m.pctChange > 0 ? '+' : ''}${m.pctChange.toFixed(0)}% ${m.trend}`;
+      lines.push(`| ${m.label} | ${bVal} | ${rVal} | ${change} |`);
+    }
+    lines.push('');
+    lines.push(`_Baseline: ${bw.turnCount} turns, Recent: ${rw.turnCount} turns_`);
+    lines.push('');
+  }
+
+  if (analysis && analysis.labels?.length > 0) {
+    lines.push('## Active Diagnosis');
+    const topLabel = analysis.labels[0];
+    lines.push(`**${topLabel.label}** (${(topLabel.confidence * 100).toFixed(0)}% confidence)`);
+    lines.push(`- ${topLabel.evidence[0]}`);
+    lines.push('');
+  }
+
+  lines.push('## Guidance');
+  lines.push(getVerdictGuidance(v.verdict, validation, analysis));
+  lines.push('');
+
+  return lines.join('\n');
+}
+
+function colorVerdict(verdict) {
+  switch (verdict) {
+    case 'likely_improved': return chalk.green.bold('LIKELY IMPROVED');
+    case 'no_clear_improvement': return chalk.yellow.bold('NO CLEAR IMPROVEMENT');
+    case 'still_recurring': return chalk.red('STILL RECURRING');
+    case 'worse': return chalk.red.bold('WORSE');
+    case 'insufficient_data': return chalk.dim.bold('INSUFFICIENT DATA');
+    default: return chalk.white(verdict);
+  }
+}
+
+function verdictEmoji(verdict) {
+  switch (verdict) {
+    case 'likely_improved': return '✅';
+    case 'no_clear_improvement': return '➖';
+    case 'still_recurring': return '🔄';
+    case 'worse': return '❌';
+    case 'insufficient_data': return '⚠️';
+    default: return '';
+  }
+}
+
+function formatMetricValue(id, val) {
+  if (id === 'avg_cost_per_turn') return `$${val.toFixed(4)}`;
+  if (id === 'retry_rate' || id === 'tool_error_rate') return `${(val * 100).toFixed(0)}%`;
+  if (id === 'context_growth_slope') return `${val >= 0 ? '+' : ''}${val.toFixed(0)} tok/turn`;
+  if (val >= 1_000_000) return `${(val / 1_000_000).toFixed(1)}M`;
+  if (val >= 1_000) return `${(val / 1_000).toFixed(1)}k`;
+  return String(Math.round(val));
+}
+
+function formatChange(pctChange, trend) {
+  const sign = pctChange > 0 ? '+' : '';
+  const pctStr = `${sign}${pctChange.toFixed(0)}%`;
+
+  switch (trend) {
+    case 'improved': return chalk.green(pctStr + ' ▼');
+    case 'worsened': return chalk.red(pctStr + ' ▲');
+    case 'flat': return chalk.dim(pctStr + ' ─');
+    default: return pctStr;
+  }
+}
+
+function colorFrequency(freq) {
+  switch (freq) {
+    case 'high': return chalk.red('high');
+    case 'medium': return chalk.yellow('medium');
+    case 'low': return chalk.green('low');
+    case 'none': return chalk.dim('none');
+    default: return String(freq);
+  }
+}
+
+function fmtPct(rate) {
+  return `${(rate * 100).toFixed(0)}%`;
+}
+
+function getVerdictGuidance(verdict, validation, analysis) {
+  const topLabel = analysis?.labels?.[0]?.label;
+
+  switch (verdict) {
+    case 'likely_improved':
+      return 'Token burn per turn is trending down. If this pattern holds, cost should decrease. Continue monitoring with periodic validate runs.';
+    case 'no_clear_improvement':
+      if (topLabel === 'context_bloat' || topLabel === 'stale_scheduled_session') {
+        return 'Context is not shrinking meaningfully. The session may need a harder reset, compaction threshold change, or idle-reset configuration.';
+      }
+      return 'Metrics are mostly flat. The applied changes may not have taken effect yet, or the session needs a different intervention.';
+    case 'still_recurring':
+      if (topLabel === 'context_bloat') {
+        return 'Context continues to grow. The bloat pattern is active — consider forcing a session reset or lowering the context token budget.';
+      }
+      if (topLabel === 'looping_or_indecision' || topLabel === 'retry_churn') {
+        return 'The agent is still retrying or looping. The root cause likely requires a prompt or tool fix, not just a cost optimization.';
+      }
+      return 'The diagnosed pattern is still active. The applied fix may not address the root cause.';
+    case 'worse':
+      return 'Key metrics have worsened. Investigate whether a recent change (model update, prompt change, new tool) is causing increased token burn.';
+    case 'insufficient_data':
+      return 'Not enough turns to draw conclusions. Run validate again after more activity in this session.';
+    default:
+      return '';
+  }
+}
