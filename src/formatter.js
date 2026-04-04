@@ -2,7 +2,7 @@ import chalk from 'chalk';
 
 // ─── PII Sanitization ──────────────────────────────────
 
-const PHONE_RE = /\+?\d{10,15}/g;
+const PHONE_RE = /\+\d{10,15}\b/g;
 const EMAIL_RE = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g;
 
 /**

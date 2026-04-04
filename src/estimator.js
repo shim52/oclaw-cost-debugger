@@ -120,7 +120,7 @@ export function getModelTier(modelId) {
   if (!modelId) return 'unknown';
   const lower = modelId.toLowerCase();
 
-  if (lower.includes('opus') || lower === 'gpt-4' || lower === 'gpt-5' || lower.includes('o1') && !lower.includes('mini'))
+  if (lower.includes('opus') || lower === 'gpt-4' || lower === 'gpt-5' || (lower.includes('o1') && !lower.includes('mini')))
     return 'premium';
   if (lower.includes('mini') || lower.includes('flash') || lower.includes('haiku'))
     return 'economy';
