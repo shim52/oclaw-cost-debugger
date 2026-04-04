@@ -16,6 +16,7 @@ export function registerScan(program) {
     .option('--no-diagnose', 'Skip heuristic diagnosis on top sessions')
     .option('-v, --verbose', 'Verbose multi-line format with detailed triage')
     .option('--full-ids', 'Display full session IDs without truncation')
+    .option('--include-empty', 'Include sessions with zero tokens/cost')
     .action(async (opts) => {
       try {
         const sessions = await discoverSessions(opts.path);
@@ -49,6 +50,11 @@ export function registerScan(program) {
           topLabel: null,
           triage: null,
         }));
+
+        // Filter out empty sessions unless --include-empty
+        if (!opts.includeEmpty) {
+          results = results.filter(r => r.totalTokens > 0 || r.estimatedCost > 0);
+        }
 
         // Sort
         switch (opts.sort) {

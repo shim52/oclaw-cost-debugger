@@ -6,6 +6,7 @@ import { registerScan } from '../src/commands/scan.js';
 import { registerInspect } from '../src/commands/inspect.js';
 import { registerFind } from '../src/commands/find.js';
 import { registerReport } from '../src/commands/report.js';
+import { registerDashboard } from '../src/commands/dashboard.js';
 
 const program = new Command();
 
@@ -18,5 +19,6 @@ registerScan(program);
 registerInspect(program);
 registerFind(program);
 registerReport(program);
+registerDashboard(program);
 
 program.parse();

@@ -60,6 +60,17 @@ function formatDuration(ms) {
   return `${(ms / 60000).toFixed(1)}m`;
 }
 
+function formatDate(d) {
+  if (!d) return '-';
+  const date = d instanceof Date ? d : new Date(d);
+  if (isNaN(date)) return '-';
+  const m = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  const h = String(date.getHours()).padStart(2, '0');
+  const min = String(date.getMinutes()).padStart(2, '0');
+  return `${m}-${day} ${h}:${min}`;
+}
+
 function colorCost(cost) {
   const s = formatCost(cost);
   if (cost >= 1) return chalk.red.bold(s);
@@ -72,6 +83,12 @@ function colorPriority(pri) {
   if (pri === 'medium') return chalk.yellow('medium');
   if (pri === 'low') return chalk.dim('low');
   return String(pri || 'unknown');
+}
+
+function colorStatus(status) {
+  if (status === 'verified') return chalk.green('verified');
+  if (status === 'unverified') return chalk.yellow('unverified');
+  return chalk.dim('conceptual');
 }
 
 function formatScanText(sessions, opts = {}) {
@@ -97,14 +114,11 @@ function formatScanText(sessions, opts = {}) {
           `   Model: ${chalk.yellow(s.model)}  Tokens: ${chalk.cyan(s.totalTokens.toLocaleString())}  Duration: ${formatDuration(s.runtimeMs)}`,
           `   Origin: ${originLabel}  Cache: ${(s.cacheRead || 0).toLocaleString()} read`,
           `   Diagnosis: ${colorLabel(s.topLabel || 'unknown')} — ${triage.whyFlagged || 'N/A'}`,
-          triage.suggestedNextStep === 'inspect' || triage.suggestedNextStep === 'review fixes'
+          triage.suggestedNextStep === 'inspect' || triage.suggestedNextStep === 'review remediations'
             ? `   ${chalk.green('→')} ${triage.whyFlagged}`
             : `   ${chalk.dim('→')} ${triage.whyFlagged || 'N/A'}`,
-          triage.fixes?.[0]?.savings
-            ? `   ${chalk.yellow('$')} Top fix: ${triage.fixes[0].title} — ${chalk.yellow(triage.fixes[0].savings)}`
-            : null,
-          triage.combinedSavings
-            ? `   ${chalk.yellow('$$')} All fixes combined: ${chalk.yellow(triage.combinedSavings)}`
+          triage.remediations?.[0]?.savings
+            ? `   ${chalk.yellow('$')} Top remediation: ${triage.remediations[0].title} — ${chalk.yellow(triage.remediations[0].savings)}`
             : null,
           chalk.dim('─'.repeat(70))
         ].filter(Boolean).join('\n');
@@ -119,6 +133,8 @@ function formatScanText(sessions, opts = {}) {
   const header = chalk.bold.white(
     padRight('#', 4) +
     padRight('Session ID', idWidth) +
+    padRight('Origin', 12) +
+    padRight('Date', 12) +
     padRight('Model', 14) +
     padRight('Cost', 10) +
     padRight('Tokens', 9) +
@@ -126,13 +142,17 @@ function formatScanText(sessions, opts = {}) {
     padRight('Action', 28)
   );
 
-  const divider = chalk.dim('─'.repeat(fullIds ? 140 : 110));
+  const divider = chalk.dim('─'.repeat(fullIds ? 164 : 134));
 
   const rows = sessions.map((s, i) => {
     const triage = s.triage || {};
 
     const rank = padRight(`${i + 1}`, 4);
     const sid = padRight(fullIds ? s.sessionId : truncate(s.sessionId, 16), idWidth);
+    const origin = s.origin ? (s.origin.provider || '-') : '-';
+    const originCol = padRight(truncate(origin, 10), 12);
+    const date = formatDate(s.updatedAt);
+    const dateCol = padRight(date, 12);
     const model = padRight(truncate(s.model, 12), 14);
     const cost = padRight(formatCost(s.estimatedCost), 10);
     const coloredCost = cost.replace(formatCost(s.estimatedCost), colorCost(s.estimatedCost));
@@ -146,7 +166,7 @@ function formatScanText(sessions, opts = {}) {
       ? chalk.green('inspect — ' + truncate(triage.whyFlagged || '', 16))
       : chalk.dim(truncate(triage.whyFlagged || 'n/a', 26));
 
-    return `${chalk.dim(rank)}${sid}${model}${coloredCost}${tokens}${diag}${action}`;
+    return `${chalk.dim(rank)}${sid}${chalk.cyan(originCol)}${chalk.dim(dateCol)}${model}${coloredCost}${tokens}${diag}${action}`;
   });
 
   return [
@@ -166,12 +186,14 @@ function formatScanMarkdown(sessions) {
   if (sessions.length === 0) return '_No sessions found._';
 
   const totalCost = sessions.reduce((sum, s) => sum + (s.estimatedCost || 0), 0);
-  const header = '| # | Session ID | Model | Cost | Tokens | Diagnosis | Action |';
-  const divider = '|---|------------|-------|------|--------|-----------|--------|';
+  const header = '| # | Session ID | Origin | Date | Model | Cost | Tokens | Diagnosis | Action |';
+  const divider = '|---|------------|--------|------|-------|------|--------|-----------|--------|';
 
   const rows = sessions.map((s, i) => {
     const triage = s.triage || {};
-    return `| ${i + 1} | \`${truncate(s.sessionId, 22)}\` | ${s.model} | ${formatCost(s.estimatedCost)} | ${s.totalTokens.toLocaleString()} | ${s.topLabel || 'unknown'} | ${triage.suggestedNextStep === 'inspect' ? '**inspect**' : triage.whyFlagged || '-'} |`;
+    const origin = s.origin ? (s.origin.provider || '-') : '-';
+    const date = formatDate(s.updatedAt);
+    return `| ${i + 1} | \`${truncate(s.sessionId, 22)}\` | ${origin} | ${date} | ${s.model} | ${formatCost(s.estimatedCost)} | ${s.totalTokens.toLocaleString()} | ${s.topLabel || 'unknown'} | ${triage.suggestedNextStep === 'inspect' ? '**inspect**' : triage.whyFlagged || '-'} |`;
   });
 
   return ['# Session Scan Results', '', header, divider, ...rows, '', `**Total: ${formatCost(totalCost)}**`, ''].join('\n');
@@ -234,38 +256,27 @@ function formatDiagnosisText(sessionId, analysis, stats) {
     lines.push('');
   }
 
-  // Fixes section
+  // Remediations section
   if (analysis.triage) {
     const t = analysis.triage;
-    const fixes = t.fixes || [];
+    const rems = t.remediations || [];
 
-    lines.push(chalk.bold.white('How To Fix'));
+    lines.push(chalk.bold.white('Remediations'));
     lines.push(`  Priority:  ${colorPriority(t.priority)}`);
     lines.push(`  Issue:     ${t.whyFlagged}`);
     lines.push('');
 
-    if (fixes.length > 0) {
-      for (let i = 0; i < fixes.length; i++) {
-        const fix = fixes[i];
-        lines.push(chalk.bold.green(`  Fix ${i + 1}: ${fix.title}`));
-        lines.push(`  ${fix.description}`);
-        if (fix.savings) {
-          lines.push(chalk.yellow(`  Savings: ${fix.savings}`));
+    if (rems.length > 0) {
+      for (let i = 0; i < rems.length; i++) {
+        const r = rems[i];
+        const badge = colorStatus(r.status);
+        const conf = r.confidence ? chalk.dim(` [${r.confidence} confidence]`) : '';
+        lines.push(chalk.bold.green(`  ${i + 1}. ${r.title}`) + `  ${badge}${conf}`);
+        lines.push(chalk.dim(`     Why: ${r.why}`));
+        lines.push(`     ${r.direction}`);
+        if (r.savings) {
+          lines.push(chalk.yellow(`     Savings: ${r.savings}`));
         }
-        if (fix.config) {
-          lines.push('');
-          for (const line of fix.config.split('\n')) {
-            lines.push(chalk.dim(`    ${line}`));
-          }
-        }
-        if (fix.docs) {
-          lines.push(chalk.dim(`    Docs: ${fix.docs}`));
-        }
-        lines.push('');
-      }
-
-      if (t.combinedSavings) {
-        lines.push(chalk.yellow.bold(`  Combined: ${t.combinedSavings}`));
         lines.push('');
       }
     }
@@ -301,30 +312,22 @@ function formatDiagnosisMarkdown(sessionId, analysis, stats) {
 
   if (analysis.triage) {
     const t = analysis.triage;
-    const fixes = t.fixes || [];
+    const rems = t.remediations || [];
 
-    lines.push('## How To Fix');
+    lines.push('## Remediations');
     lines.push(`**Priority:** ${t.priority}  `);
     lines.push(`**Issue:** ${t.whyFlagged}`);
     lines.push('');
 
-    if (fixes.length > 0) {
-      for (let i = 0; i < fixes.length; i++) {
-        const fix = fixes[i];
-        lines.push(`### Fix ${i + 1}: ${fix.title}`);
-        lines.push(fix.description);
-        if (fix.savings) lines.push(`**Savings:** ${fix.savings}`);
-        if (fix.config) {
-          lines.push('```json5');
-          lines.push(fix.config.replace(/^\/\/.*\n/, '')); // strip comment line
-          lines.push('```');
-        }
-        if (fix.docs) lines.push(`*Config keys: ${fix.docs}*`);
-        lines.push('');
-      }
-
-      if (t.combinedSavings) {
-        lines.push(`**Combined savings:** ${t.combinedSavings}`);
+    if (rems.length > 0) {
+      for (let i = 0; i < rems.length; i++) {
+        const r = rems[i];
+        const badge = r.status === 'verified' ? '✅ verified' : r.status === 'unverified' ? '⚠️ unverified' : '💡 conceptual';
+        const conf = r.confidence ? ` [${r.confidence} confidence]` : '';
+        lines.push(`### ${i + 1}. ${r.title} — ${badge}${conf}`);
+        lines.push(`> **Why:** ${r.why}`);
+        lines.push(r.direction);
+        if (r.savings) lines.push(`**Savings:** ${r.savings}`);
         lines.push('');
       }
     }

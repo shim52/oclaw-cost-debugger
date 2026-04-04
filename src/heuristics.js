@@ -80,19 +80,22 @@ function detectScheduledWorkflow({ userMsgs, events, meta }) {
   let confidence = 0;
 
   const provider = meta?.origin?.provider;
-  const isCron = provider === 'cron' || 
+  const isRelay = provider === 'whatsapp' || provider === 'telegram' || provider === 'slack';
+  const isCron = provider === 'cron' ||
                  userMsgs.some(m => m.textContent?.toLowerCase().includes('[cron:'));
-                 
+
   if (isCron) {
     confidence += 0.8;
     evidence.push(`Session origin identified as a scheduled/cron-bound workflow`);
-    
-    // Check if it's getting stale/bloated
-    const totalTokens = events.reduce((sum, e) => sum + (e?.message?.usage?.totalTokens || 0), 0);
-    // If context is huge or there are many turns over a long time
-    if (totalTokens > 50000 || events.length > 30) {
-      evidence.push(`Scheduled session has accumulated massive context (${totalTokens.toLocaleString()} tokens or >30 events) and may be growing stale`);
-      return { label: 'stale_scheduled_session', confidence: 0.95, evidence };
+
+    // Don't promote to stale_scheduled if this is primarily a relay session —
+    // relay sessions with embedded cron triggers are better described by context_bloat
+    if (!isRelay) {
+      const totalTokens = events.reduce((sum, e) => sum + (e?.message?.usage?.totalTokens || 0), 0);
+      if (totalTokens > 50000 || events.length > 30) {
+        evidence.push(`Scheduled session has accumulated massive context (${totalTokens.toLocaleString()} tokens or >30 events) and may be growing stale`);
+        return { label: 'stale_scheduled_session', confidence: 0.95, evidence };
+      }
     }
   }
 
@@ -433,7 +436,6 @@ function computeTriage(topLabel, meta, allLabels, events) {
   const model = meta?.model || '';
   const hasEvents = events && events.length > 0;
 
-  // Compute simulated costs when we have events
   let actualCost = cost;
   if (hasEvents && actualCost === 0) {
     actualCost = estimateSessionCostFromEvents(events);
@@ -444,13 +446,15 @@ function computeTriage(topLabel, meta, allLabels, events) {
   let compactedCost = null;
 
   if (hasEvents) {
-    if (economyModel) {
-      modelSwitchCost = simulateModelSwitch(events, economyModel);
-    }
+    if (economyModel) modelSwitchCost = simulateModelSwitch(events, economyModel);
     compactedCost = simulateCompaction(events, 50000);
   }
 
-  const fixes = [];
+  const remediations = [];
+
+  // Helper to format savings string
+  const fmtSavings = (amount, suffix = '/session') =>
+    amount > 0.01 ? `~$${amount.toFixed(2)}${suffix}` : null;
 
   // ─── Context bloat / stale sessions ────────────────────
 
@@ -458,76 +462,57 @@ function computeTriage(topLabel, meta, allLabels, events) {
     const isRelay = allLabels.some(l => l.label === 'relay_workflow');
     const isCron = allLabels.some(l => l.label === 'scheduled_workflow' || l.label === 'stale_scheduled_session');
 
-    // Fix 1: Session reset
-    if (isRelay) {
-      fixes.push({
-        title: 'Enable idle session reset',
-        description: 'Automatically reset the session after a period of inactivity, clearing accumulated context.',
-        savings: actualCost > 0 ? `~$${(actualCost * 0.7).toFixed(2)}/session` : null,
-        config: `// openclaw.config.json5\n{\n  session: {\n    reset: {\n      mode: "idle",\n      idleMinutes: 30\n    }\n  }\n}`,
-        docs: 'session.reset.mode, session.reset.idleMinutes',
-      });
-    } else if (isCron) {
-      fixes.push({
-        title: 'Reset session between cron runs',
-        description: 'Use daily reset so each cron invocation starts fresh instead of accumulating context.',
-        savings: actualCost > 0 ? `~$${(actualCost * 0.7).toFixed(2)}/run` : null,
-        config: `// openclaw.config.json5\n{\n  session: {\n    reset: {\n      mode: "daily",\n      atHour: 4   // reset at 4am before morning cron\n    }\n  }\n}`,
-        docs: 'session.reset.mode, session.reset.atHour',
-      });
-    }
+    remediations.push({
+      title: isRelay ? 'Reset session after inactivity' : isCron ? 'Reset session between scheduled runs' : 'Reset or rotate long-lived sessions',
+      why: 'This session has accumulated a large context that gets re-sent with every turn, driving up cost.',
+      direction: isRelay
+        ? 'Configure idle-based session reset so relay conversations automatically start fresh after a quiet period.'
+        : isCron
+        ? 'Configure daily or per-run session reset so cron jobs don\'t carry forward stale context.'
+        : 'Ensure long-lived sessions are periodically reset or compacted to prevent unbounded context growth.',
+      status: 'conceptual',
+      confidence: 'high',
+      savings: fmtSavings(actualCost * 0.7),
+    });
 
-    // Fix 2: Compaction
     if (compactedCost != null && actualCost > 0) {
       const savings = actualCost - compactedCost;
       if (savings > 0.01) {
-        fixes.push({
+        remediations.push({
           title: 'Enable context compaction',
-          description: 'Automatically summarize old conversation history when context exceeds a threshold, keeping recent messages intact.',
-          savings: `~$${savings.toFixed(2)}/session`,
-          config: `// openclaw.config.json5\n{\n  agents: {\n    defaults: {\n      compaction: {\n        mode: "safeguard",\n        reserveTokensFloor: 24000,\n        memoryFlush: { enabled: true }\n      }\n    }\n  }\n}`,
-          docs: 'agents.defaults.compaction.mode, agents.defaults.compaction.reserveTokensFloor',
+          why: 'Even without full session resets, compaction can summarize old history to keep context size bounded.',
+          direction: 'Enable compaction with a reasonable token floor so the agent retains recent context while discarding old turns.',
+          status: 'conceptual',
+          confidence: 'high',
+          savings: fmtSavings(savings),
         });
       }
     }
 
-    // Fix 3: Context pruning for large tool results
     const hasLargeToolResults = allLabels.some(l =>
       l.evidence?.some(e => e.includes('tool results exceeded'))
     );
     if (hasLargeToolResults) {
-      fixes.push({
-        title: 'Enable context pruning for tool results',
-        description: 'Automatically trim or clear old tool results that bloat the context window.',
-        savings: null,
-        config: `// openclaw.config.json5\n{\n  agents: {\n    defaults: {\n      contextPruning: {\n        mode: "cache-ttl",\n        ttl: "30m",\n        softTrim: { maxChars: 4000 },\n        hardClear: { enabled: true }\n      }\n    }\n  }\n}`,
-        docs: 'agents.defaults.contextPruning.mode, agents.defaults.contextPruning.ttl',
+      remediations.push({
+        title: 'Prune old tool results from context',
+        why: 'Large tool results are being retained in context long after they\'re useful, inflating every subsequent turn.',
+        direction: 'Enable context pruning so old tool results are trimmed or cleared after a TTL. This reduces context size without losing recent information.',
+        status: 'conceptual',
+        confidence: 'medium',
       });
     }
 
-    // Fix 4: Cheaper model
     if (economyModel && modelSwitchCost != null && actualCost > 0) {
       const savings = actualCost - modelSwitchCost;
       if (savings > 0.01) {
-        fixes.push({
-          title: `Switch to ${economyModel}`,
-          description: `Relay and simple tasks rarely need a premium model. "${economyModel}" handles them at a fraction of the cost.`,
-          savings: `~$${savings.toFixed(2)}/session`,
-          config: `// openclaw.config.json5\n{\n  agents: {\n    defaults: {\n      model: {\n        primary: "openai/${economyModel}"\n      }\n    }\n  }\n}`,
-          docs: 'agents.defaults.model.primary',
+        remediations.push({
+          title: `Use a cheaper model (e.g. ${economyModel})`,
+          why: `This session uses "${model}" but the workload appears simple enough for an economy model.`,
+          direction: `Route this session type to a cheaper model. "${economyModel}" would handle it at a fraction of the cost.`,
+          status: 'conceptual',
+          confidence: isRelay ? 'high' : 'medium',
+          savings: fmtSavings(savings),
         });
-      }
-    }
-
-    // Combined savings
-    let combinedSavings = null;
-    if (compactedCost != null && economyModel && actualCost > 0) {
-      const compactedOnCheap = hasEvents ? simulateCompaction(events, 50000) : null;
-      const cheapCompacted = compactedOnCheap != null
-        ? simulateModelSwitch(events, economyModel) * (compactedCost / Math.max(actualCost, 0.001))
-        : null;
-      if (cheapCompacted != null && cheapCompacted < actualCost) {
-        combinedSavings = `~$${(actualCost - cheapCompacted).toFixed(2)}/session (compaction + model switch)`;
       }
     }
 
@@ -537,8 +522,7 @@ function computeTriage(topLabel, meta, allLabels, events) {
       whyFlagged: label === 'stale_scheduled_session'
         ? 'stale cron session — context keeps growing between runs'
         : 'context keeps growing — each turn re-sends old tokens',
-      fixes,
-      combinedSavings,
+      remediations,
     };
   }
 
@@ -548,29 +532,30 @@ function computeTriage(topLabel, meta, allLabels, events) {
     if (economyModel && modelSwitchCost != null && actualCost > 0) {
       const savings = actualCost - modelSwitchCost;
       if (savings > 0.01) {
-        fixes.push({
-          title: `Use ${economyModel} for relay sessions`,
-          description: 'Message relay rarely needs a premium model. A cheaper model handles forwarding just as well.',
-          savings: `~$${savings.toFixed(2)}/session`,
-          config: `// openclaw.config.json5\n{\n  agents: {\n    defaults: {\n      model: {\n        primary: "openai/${economyModel}"\n      }\n    }\n  }\n}`,
-          docs: 'agents.defaults.model.primary',
+        remediations.push({
+          title: `Use a cheaper model for relay (e.g. ${economyModel})`,
+          why: 'Message relay rarely needs premium reasoning. The model is doing simple forwarding work.',
+          direction: 'Route relay sessions to an economy model. This is the simplest cost reduction for this session type.',
+          status: 'conceptual',
+          confidence: 'high',
+          savings: fmtSavings(savings),
         });
       }
     }
 
-    fixes.push({
-      title: 'Enable idle session reset',
-      description: 'Prevent context from growing over long relay conversations.',
-      savings: null,
-      config: `// openclaw.config.json5\n{\n  session: {\n    reset: {\n      mode: "idle",\n      idleMinutes: 60\n    }\n  }\n}`,
-      docs: 'session.reset.mode, session.reset.idleMinutes',
+    remediations.push({
+      title: 'Prevent context growth over time',
+      why: 'Long relay conversations accumulate context. Each new message re-sends everything that came before.',
+      direction: 'Configure idle-based session reset so relay sessions start fresh after a quiet period, preventing gradual context bloat.',
+      status: 'conceptual',
+      confidence: 'medium',
     });
 
     return {
-      priority: fixes.some(f => f.savings) ? 'low' : 'low',
-      suggestedNextStep: fixes.some(f => f.savings) ? 'review fixes' : 'ignore',
+      priority: 'low',
+      suggestedNextStep: remediations.some(r => r.savings) ? 'review remediations' : 'ignore',
       whyFlagged: 'message relay — cost is expected but can be reduced',
-      fixes,
+      remediations,
     };
   }
 
@@ -581,12 +566,12 @@ function computeTriage(topLabel, meta, allLabels, events) {
       priority: 'low',
       suggestedNextStep: 'ignore',
       whyFlagged: 'cron session — expected recurring cost',
-      fixes: [{
-        title: 'Monitor for context growth',
-        description: 'This cron session is healthy now, but long-running cron sessions tend to accumulate context over time.',
-        savings: null,
-        config: `// openclaw.config.json5 (preventive)\n{\n  session: {\n    reset: {\n      mode: "daily",\n      atHour: 4\n    }\n  }\n}`,
-        docs: 'session.reset.mode',
+      remediations: [{
+        title: 'Watch for context growth',
+        why: 'This cron session is healthy now, but long-running cron sessions tend to accumulate context over time.',
+        direction: 'Consider enabling daily session reset as a preventive measure so cron sessions always start with a clean context.',
+        status: 'conceptual',
+        confidence: 'low',
       }],
     };
   }
@@ -594,20 +579,15 @@ function computeTriage(topLabel, meta, allLabels, events) {
   // ─── Looping / retry churn ─────────────────────────────
 
   if (label === 'looping_or_indecision' || label === 'retry_churn') {
-    fixes.push({
-      title: 'Limit agent-to-agent ping-pong',
-      description: 'Cap the maximum back-and-forth turns between agents to prevent runaway loops.',
-      savings: actualCost > 0 ? `~$${(actualCost * 0.5).toFixed(2)} wasted on loops` : null,
-      config: `// openclaw.config.json5\n{\n  session: {\n    agentToAgent: {\n      maxPingPongTurns: 3\n    }\n  }\n}`,
-      docs: 'session.agentToAgent.maxPingPongTurns',
-    });
-
-    fixes.push({
-      title: 'Enable compaction to limit damage',
-      description: 'Even if the agent loops, compaction prevents the context from growing unbounded.',
-      savings: null,
-      config: `// openclaw.config.json5\n{\n  agents: {\n    defaults: {\n      compaction: {\n        mode: "safeguard",\n        reserveTokensFloor: 24000\n      }\n    }\n  }\n}`,
-      docs: 'agents.defaults.compaction.mode',
+    remediations.push({
+      title: 'Limit runaway turn counts',
+      why: label === 'retry_churn'
+        ? 'The agent is retrying identical tool calls, burning tokens without making progress.'
+        : 'The agent is producing many turns without clear forward progress, likely stuck in a loop.',
+      direction: 'Cap agent-to-agent turn limits and add compaction as a safety net. Investigate the root cause — the agent may need a clearer prompt or better error handling.',
+      status: 'conceptual',
+      confidence: 'high',
+      savings: fmtSavings(actualCost * 0.5, ' wasted on loops'),
     });
 
     return {
@@ -616,105 +596,112 @@ function computeTriage(topLabel, meta, allLabels, events) {
       whyFlagged: label === 'retry_churn'
         ? 'identical tool calls being retried — burning tokens'
         : 'agent is looping without progress',
-      fixes,
+      remediations,
     };
   }
 
   // ─── Tool failure cascade ──────────────────────────────
 
   if (label === 'tool_failure_cascade') {
-    fixes.push({
+    remediations.push({
       title: 'Fix the failing tools',
-      description: 'The agent keeps retrying broken tool calls. Fix the root cause or disable the broken tool.',
-      savings: actualCost > 0 ? `~$${(actualCost * 0.3).toFixed(2)} wasted on failures` : null,
-      config: null,
-      docs: null,
+      why: 'The agent keeps retrying broken tool calls. Each retry burns tokens on the full context re-send.',
+      direction: 'Investigate which tools are failing and fix the root cause. If a tool is intermittently broken, consider disabling it temporarily.',
+      status: 'conceptual',
+      confidence: 'high',
+      savings: fmtSavings(actualCost * 0.3, ' wasted on failures'),
     });
 
     return {
       priority: 'high',
       suggestedNextStep: 'inspect',
       whyFlagged: 'tool errors cascading — agent keeps trying and failing',
-      fixes,
+      remediations,
     };
   }
 
   // ─── Overpowered simple task ───────────────────────────
 
   if (label === 'overpowered_simple_task') {
+    const isHeartbeat = meta?.origin?.provider === 'heartbeat';
+
     if (economyModel && modelSwitchCost != null && actualCost > 0) {
-      fixes.push({
-        title: `Switch to ${economyModel}`,
-        description: `This session used only a few messages. "${economyModel}" would handle it at a fraction of the cost.`,
-        savings: `~$${(actualCost - modelSwitchCost).toFixed(2)}/run`,
-        config: `// openclaw.config.json5\n{\n  agents: {\n    defaults: {\n      model: {\n        primary: "openai/${economyModel}"\n      }\n    }\n  }\n}`,
-        docs: 'agents.defaults.model.primary',
+      remediations.push({
+        title: `Use a cheaper model (e.g. ${economyModel})`,
+        why: isHeartbeat
+          ? `Heartbeat health checks are running on "${model}" which is expensive for a simple status check.`
+          : `This session used "${model}" for a simple task with minimal output.`,
+        direction: isHeartbeat
+          ? 'Route heartbeat sessions to an economy model. If your platform supports a heartbeat-specific model override, use that.'
+          : `Route this session type to an economy model like "${economyModel}".`,
+        status: 'conceptual',
+        confidence: 'high',
+        savings: fmtSavings(actualCost - modelSwitchCost, '/run'),
       });
     }
 
-    // Suggest heartbeat-specific config if it's a heartbeat
-    const isHeartbeat = meta?.origin?.provider === 'heartbeat';
     if (isHeartbeat) {
-      fixes.push({
-        title: 'Use a dedicated heartbeat model',
-        description: 'Override the model specifically for heartbeat runs to avoid paying premium prices for health checks.',
-        savings: null,
-        config: `// openclaw.config.json5\n{\n  agents: {\n    defaults: {\n      heartbeat: {\n        model: "openai/${economyModel || 'gpt-5-mini'}",\n        lightContext: true\n      }\n    }\n  }\n}`,
-        docs: 'agents.defaults.heartbeat.model, agents.defaults.heartbeat.lightContext',
+      remediations.push({
+        title: 'Use lightweight context for heartbeats',
+        why: 'Heartbeats may be loading full agent context unnecessarily, inflating input tokens.',
+        direction: 'If your platform supports it, enable a "light context" mode for heartbeat runs that loads only essential bootstrap files.',
+        status: 'conceptual',
+        confidence: 'medium',
       });
     }
 
     return {
       priority: 'medium',
       suggestedNextStep: 'inspect',
-      whyFlagged: `premium model "${model}" on a simple task`,
-      fixes,
+      whyFlagged: isHeartbeat ? `heartbeat using expensive model "${model}"` : `premium model "${model}" on a simple task`,
+      remediations,
     };
   }
 
   // ─── Weak model for complex step ───────────────────────
 
   if (label === 'weak_model_for_complex_step') {
-    fixes.push({
-      title: 'Upgrade model for complex tasks',
-      description: 'The economy model is generating excessive turns. A stronger model would complete the task in fewer turns, potentially at lower total cost.',
-      savings: null,
-      config: `// openclaw.config.json5\n{\n  agents: {\n    defaults: {\n      model: {\n        primary: "openai/gpt-5",\n        fallbacks: ["openai/${model}"]\n      }\n    }\n  }\n}`,
-      docs: 'agents.defaults.model.primary, agents.defaults.model.fallbacks',
+    remediations.push({
+      title: 'Upgrade to a stronger model',
+      why: `The economy model "${model}" is generating excessive turns, suggesting the task is too complex for it.`,
+      direction: 'Route this session type to a standard or premium model. A stronger model would likely complete the task in fewer turns, potentially at lower total cost.',
+      status: 'conceptual',
+      confidence: 'medium',
     });
 
     return {
       priority: 'medium',
       suggestedNextStep: 'inspect',
       whyFlagged: `economy model "${model}" struggling — too many turns`,
-      fixes,
+      remediations,
     };
   }
 
   // ─── Bad task decomposition ────────────────────────────
 
   if (label === 'bad_task_decomposition') {
-    fixes.push({
-      title: 'Break into sub-tasks',
-      description: 'A single monolithic prompt is driving many agent turns. Split into smaller prompts that each get a fresh context.',
-      savings: actualCost > 0 ? `~$${(actualCost * 0.3).toFixed(2)} by reducing context re-sends` : null,
-      config: null,
-      docs: null,
+    remediations.push({
+      title: 'Break into smaller sub-tasks',
+      why: 'A single monolithic prompt is driving many agent turns. The context grows with each turn, compounding cost.',
+      direction: 'Split the work into smaller, focused prompts. Each sub-task gets a fresh context, avoiding the cost of re-sending accumulated history.',
+      status: 'conceptual',
+      confidence: 'high',
+      savings: fmtSavings(actualCost * 0.3, ' by reducing context re-sends'),
     });
 
-    fixes.push({
+    remediations.push({
       title: 'Lower the context budget',
-      description: 'Force the agent to work within a smaller context window, which naturally limits cost per turn.',
-      savings: null,
-      config: `// openclaw.config.json5\n{\n  agents: {\n    defaults: {\n      model: {\n        contextTokens: 100000\n      }\n    }\n  }\n}`,
-      docs: 'agents.defaults.model.contextTokens',
+      why: 'A smaller context budget forces the agent to work more efficiently and triggers compaction sooner.',
+      direction: 'Reduce the effective context token limit for this agent or session type.',
+      status: 'conceptual',
+      confidence: 'medium',
     });
 
     return {
       priority: 'medium',
       suggestedNextStep: 'inspect',
       whyFlagged: 'monolithic prompt causing long agent runs',
-      fixes,
+      remediations,
     };
   }
 
@@ -725,12 +712,12 @@ function computeTriage(topLabel, meta, allLabels, events) {
       priority: 'medium',
       suggestedNextStep: 'inspect',
       whyFlagged: 'abnormal token spike — possible provider issue',
-      fixes: [{
-        title: 'Check provider changelog',
-        description: 'A sudden token spike may indicate a model update that changed output verbosity. Compare recent runs with historical averages.',
-        savings: null,
-        config: null,
-        docs: null,
+      remediations: [{
+        title: 'Investigate the token spike',
+        why: 'A sudden increase in token usage may indicate a model update that changed output verbosity, or an unexpected change in input size.',
+        direction: 'Compare recent runs with historical averages. Check if the model provider released an update around the time of the spike.',
+        status: 'conceptual',
+        confidence: 'medium',
       }],
     };
   }
@@ -739,12 +726,13 @@ function computeTriage(topLabel, meta, allLabels, events) {
 
   if (tokens > 50000) {
     if (economyModel && modelSwitchCost != null && actualCost > 0) {
-      fixes.push({
-        title: `Consider ${economyModel}`,
-        description: 'If this session type doesn\'t need premium reasoning, switching models would reduce cost.',
-        savings: `~$${(actualCost - modelSwitchCost).toFixed(2)}/session`,
-        config: `// openclaw.config.json5\n{\n  agents: {\n    defaults: {\n      model: {\n        primary: "openai/${economyModel}"\n      }\n    }\n  }\n}`,
-        docs: 'agents.defaults.model.primary',
+      remediations.push({
+        title: `Consider a cheaper model (e.g. ${economyModel})`,
+        why: `High token usage with "${model}". If this session type doesn't need premium reasoning, a cheaper model would reduce cost.`,
+        direction: `Evaluate whether this session type can use "${economyModel}" without quality loss.`,
+        status: 'conceptual',
+        confidence: 'medium',
+        savings: fmtSavings(actualCost - modelSwitchCost),
       });
     }
 
@@ -752,7 +740,7 @@ function computeTriage(topLabel, meta, allLabels, events) {
       priority: 'high',
       suggestedNextStep: 'inspect',
       whyFlagged: 'high token usage with no clear pattern',
-      fixes,
+      remediations,
     };
   }
 
@@ -761,7 +749,7 @@ function computeTriage(topLabel, meta, allLabels, events) {
       priority: 'medium',
       suggestedNextStep: 'inspect',
       whyFlagged: 'non-trivial usage — worth reviewing',
-      fixes: [],
+      remediations: [],
     };
   }
 
@@ -769,6 +757,6 @@ function computeTriage(topLabel, meta, allLabels, events) {
     priority: 'low',
     suggestedNextStep: 'ignore',
     whyFlagged: 'low cost, no issues detected',
-    fixes: [],
+    remediations: [],
   };
 }
