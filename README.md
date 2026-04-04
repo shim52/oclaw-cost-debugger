@@ -1,4 +1,4 @@
-# Agent Cost Debugger
+# OClaw Cost Debugger
 
 Local CLI that scans OpenClaw session history to find expensive sessions, explain why they got expensive, and suggest what to try next.
 
@@ -8,21 +8,21 @@ Runs entirely on your machine. No cloud, no uploads, no write-back.
 
 ```bash
 npm install
-npm link          # makes `agent-cost-debugger` available globally
+npm link          # makes `oclaw-cost-debugger` available globally
 ```
 
 ## Quick start
 
 ```bash
 # See where your money is going
-agent-cost-debugger dashboard --path ~/.openclaw/agents/main/sessions
+oclaw-cost-debugger dashboard --path ~/.openclaw/agents/main/sessions
 
 # Find the costliest sessions
-agent-cost-debugger scan --sort cost
+oclaw-cost-debugger scan --sort cost
 
 # Deep-dive into a specific session
-agent-cost-debugger inspect 21fd        # by ID prefix
-agent-cost-debugger inspect --rank 1 --sort cost   # the most expensive one
+oclaw-cost-debugger inspect 21fd        # by ID prefix
+oclaw-cost-debugger inspect --rank 1 --sort cost   # the most expensive one
 ```
 
 ## Commands
@@ -32,9 +32,9 @@ agent-cost-debugger inspect --rank 1 --sort cost   # the most expensive one
 Shows total cost, cost breakdown by channel and issue type, top sessions, and quick wins with estimated savings.
 
 ```bash
-agent-cost-debugger dashboard
-agent-cost-debugger dashboard --path ./sessions
-agent-cost-debugger dashboard --format json
+oclaw-cost-debugger dashboard
+oclaw-cost-debugger dashboard --path ./sessions
+oclaw-cost-debugger dashboard --format json
 ```
 
 ### `scan` — find the costliest sessions
@@ -42,11 +42,11 @@ agent-cost-debugger dashboard --format json
 Ranks sessions by cost or token usage. Each session gets a heuristic diagnosis and action recommendation.
 
 ```bash
-agent-cost-debugger scan                              # default top 5 by tokens
-agent-cost-debugger scan --sort cost -v               # verbose, sorted by cost
-agent-cost-debugger scan -n 10 --sort cost            # top 10 by cost
-agent-cost-debugger scan --include-empty              # include zero-activity sessions
-agent-cost-debugger scan --format markdown            # pipe-friendly output
+oclaw-cost-debugger scan                              # default top 5 by tokens
+oclaw-cost-debugger scan --sort cost -v               # verbose, sorted by cost
+oclaw-cost-debugger scan -n 10 --sort cost            # top 10 by cost
+oclaw-cost-debugger scan --include-empty              # include zero-activity sessions
+oclaw-cost-debugger scan --format markdown            # pipe-friendly output
 ```
 
 ### `inspect` — deep-dive into a session
@@ -54,17 +54,17 @@ agent-cost-debugger scan --format markdown            # pipe-friendly output
 Shows full stats, heuristic diagnosis with evidence, and remediations with confidence levels.
 
 ```bash
-agent-cost-debugger inspect <session-id>              # by full or prefix ID
-agent-cost-debugger inspect --rank 1 --sort cost      # inspect the costliest
-agent-cost-debugger inspect --rank 2 --format json    # JSON output for scripting
+oclaw-cost-debugger inspect <session-id>              # by full or prefix ID
+oclaw-cost-debugger inspect --rank 1 --sort cost      # inspect the costliest
+oclaw-cost-debugger inspect --rank 2 --format json    # JSON output for scripting
 ```
 
 ### `find` — search and filter sessions
 
 ```bash
-agent-cost-debugger find --model gpt-5
-agent-cost-debugger find --min-tokens 50000
-agent-cost-debugger find --after 2026-03-01
+oclaw-cost-debugger find --model gpt-5
+oclaw-cost-debugger find --min-tokens 50000
+oclaw-cost-debugger find --after 2026-03-01
 ```
 
 ### `report` — full diagnostic report
@@ -72,8 +72,8 @@ agent-cost-debugger find --after 2026-03-01
 Generates scan + diagnosis for the top N sessions. Useful for saving or sharing.
 
 ```bash
-agent-cost-debugger report --top 5 --format markdown > report.md
-agent-cost-debugger report -o report.txt
+oclaw-cost-debugger report --top 5 --format markdown > report.md
+oclaw-cost-debugger report -o report.txt
 ```
 
 ## What it detects

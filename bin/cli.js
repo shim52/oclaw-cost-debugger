@@ -11,7 +11,7 @@ import { registerDashboard } from '../src/commands/dashboard.js';
 const program = new Command();
 
 program
-  .name('agent-cost-debugger')
+  .name('oclaw-cost-debugger')
   .description(chalk.bold('🔍 Scan OpenClaw sessions and diagnose token burn'))
   .version('1.0.0');
 

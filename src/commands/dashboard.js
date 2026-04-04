@@ -194,7 +194,7 @@ function renderDashboard(sessions) {
     }
   }
 
-  lines.push(chalk.dim(`  Run ${chalk.white('agent-cost-debugger inspect <id>')} for full diagnosis`));
+  lines.push(chalk.dim(`  Run ${chalk.white('oclaw-cost-debugger inspect <id>')} for full diagnosis`));
   lines.push('');
 
   return lines.join('\n');
