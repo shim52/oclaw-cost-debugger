@@ -8,6 +8,7 @@ import {
   aggregateWindow,
   compareWindows,
   computeVerdict,
+  computeNextHypothesis,
   validateImpact
 } from '../src/trend.js';
 import { join, dirname } from 'node:path';
@@ -205,6 +206,76 @@ describe('trend analysis', () => {
       // sess-004 has very few turns — may be insufficient
       if (result.verdict.verdict === 'insufficient_data') {
         assert.equal(result.strategy, 'none');
+        assert.equal(result.nextHypothesis, null, 'No next hypothesis for insufficient data');
+      }
+    });
+  });
+
+  describe('computeNextHypothesis', () => {
+    it('returns null for likely_improved', () => {
+      const verdict = { verdict: 'likely_improved', confidence: 'high', reason: 'test' };
+      const result = computeNextHypothesis(verdict, [], aggregateWindow([]), aggregateWindow([]), []);
+      assert.equal(result, null);
+    });
+
+    it('returns null for insufficient_data', () => {
+      const verdict = { verdict: 'insufficient_data', confidence: 'low', reason: 'test' };
+      const result = computeNextHypothesis(verdict, [], aggregateWindow([]), aggregateWindow([]), []);
+      assert.equal(result, null);
+    });
+
+    it('produces escalation for worse verdict with context_bloat', async () => {
+      const { events } = await parseTranscript(join(FIXTURES_DIR, 'sess-007-no-improvement.jsonl'));
+      const result = validateImpact(events, {
+        diagnosisLabels: ['context_bloat'],
+      });
+
+      assert.ok(result.nextHypothesis, 'Should produce a next hypothesis for negative verdict');
+      assert.ok(result.nextHypothesis.likelyIssueClass, 'Should have a likely issue class');
+      assert.ok(result.nextHypothesis.explanation, 'Should have an explanation');
+      assert.ok(result.nextHypothesis.nextActions.length > 0, 'Should have next actions');
+    });
+
+    it('produces escalation for still_recurring retry_churn', async () => {
+      const { events } = await parseTranscript(join(FIXTURES_DIR, 'sess-007-no-improvement.jsonl'));
+      const result = validateImpact(events, {
+        diagnosisLabels: ['retry_churn'],
+      });
+
+      assert.ok(result.nextHypothesis, 'Should produce next hypothesis for retry_churn');
+      assert.ok(
+        result.nextHypothesis.likelyIssueClass.includes('retry') || result.nextHypothesis.likelyIssueClass.includes('workflow'),
+        `Expected retry/workflow issue class, got: ${result.nextHypothesis.likelyIssueClass}`
+      );
+    });
+
+    it('produces context-aware escalation for mixed_signals bloat', async () => {
+      const { events } = await parseTranscript(join(FIXTURES_DIR, 'sess-006-long-lived.jsonl'));
+      const result = validateImpact(events, {
+        diagnosisLabels: ['context_bloat'],
+      });
+
+      // sess-006 gets mixed_signals — should still get escalation
+      assert.ok(result.nextHypothesis, 'mixed_signals should produce escalation guidance');
+      assert.ok(result.nextHypothesis.nextActions.length >= 2, 'Should have at least 2 next actions');
+    });
+
+    it('does not produce escalation for improved sessions', async () => {
+      // Use a session that gets likely_improved (we'll test with a synthetic verdict)
+      const verdict = { verdict: 'likely_improved', confidence: 'medium', reason: 'test' };
+      const result = computeNextHypothesis(verdict, [], aggregateWindow([]), aggregateWindow([]), ['context_bloat']);
+      assert.equal(result, null, 'Should not escalate an improved session');
+    });
+
+    it('produces generic escalation when diagnosis is unknown', async () => {
+      const { events } = await parseTranscript(join(FIXTURES_DIR, 'sess-007-no-improvement.jsonl'));
+      const result = validateImpact(events, {
+        diagnosisLabels: ['unknown'],
+      });
+
+      if (result.nextHypothesis) {
+        assert.ok(result.nextHypothesis.likelyIssueClass, 'Generic escalation should have an issue class');
+        assert.ok(result.nextHypothesis.nextActions.length > 0, 'Generic escalation should have actions');
       }
     });
   });

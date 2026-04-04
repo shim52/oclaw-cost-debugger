@@ -536,6 +536,22 @@ function formatValidationText(sessionId, validation, analysis) {
   lines.push(`  ${getVerdictGuidance(v.verdict, validation, analysis)}`);
   lines.push('');
 
+  // Next hypothesis for failed remediations
+  const nh = validation.nextHypothesis;
+  if (nh) {
+    lines.push(chalk.bold.white('  Next Hypothesis'));
+    lines.push(chalk.dim('  ' + '─'.repeat(66)));
+    lines.push(`  Likely issue: ${chalk.yellow.bold(nh.likelyIssueClass)}`);
+    lines.push('');
+    lines.push(`  ${nh.explanation}`);
+    lines.push('');
+    lines.push(chalk.bold.white('  What to Try Next'));
+    for (let i = 0; i < nh.nextActions.length; i++) {
+      lines.push(`  ${chalk.cyan(`${i + 1}.`)} ${nh.nextActions[i]}`);
+    }
+    lines.push('');
+  }
+
   return lines.join('\n');
 }
 
@@ -583,6 +599,20 @@ function formatValidationMarkdown(sessionId, validation, analysis) {
   lines.push('## Guidance');
   lines.push(getVerdictGuidance(v.verdict, validation, analysis));
   lines.push('');
+
+  const nh = validation.nextHypothesis;
+  if (nh) {
+    lines.push('## Next Hypothesis');
+    lines.push(`**Likely issue:** ${nh.likelyIssueClass}`);
+    lines.push('');
+    lines.push(`> ${nh.explanation}`);
+    lines.push('');
+    lines.push('### What to Try Next');
+    for (let i = 0; i < nh.nextActions.length; i++) {
+      lines.push(`${i + 1}. ${nh.nextActions[i]}`);
+    }
+    lines.push('');
+  }
 
   return lines.join('\n');
 }
