@@ -224,7 +224,7 @@ describe('trend analysis', () => {
       assert.equal(result, null);
     });
 
-    it('produces escalation for worse verdict with context_bloat', async () => {
+    it('produces escalation with causalBridge for worse verdict', async () => {
       const { events } = await parseTranscript(join(FIXTURES_DIR, 'sess-007-no-improvement.jsonl'));
       const result = validateImpact(events, {
         diagnosisLabels: ['context_bloat'],
@@ -232,8 +232,19 @@ describe('trend analysis', () => {
 
       assert.ok(result.nextHypothesis, 'Should produce a next hypothesis for negative verdict');
       assert.ok(result.nextHypothesis.likelyIssueClass, 'Should have a likely issue class');
-      assert.ok(result.nextHypothesis.explanation, 'Should have an explanation');
+      assert.ok(result.nextHypothesis.causalBridge, 'Should have a causal bridge explaining why first-line failed');
       assert.ok(result.nextHypothesis.nextActions.length > 0, 'Should have next actions');
+    });
+
+    it('includes structuralRisk when context is large and bloat persists', async () => {
+      const { events } = await parseTranscript(join(FIXTURES_DIR, 'sess-007-no-improvement.jsonl'));
+      const result = validateImpact(events, {
+        diagnosisLabels: ['context_bloat'],
+      });
+
+      // sess-007 has large, growing context — should surface structural risk
+      assert.ok(result.nextHypothesis.structuralRisk,
+        'Should include a structural risk for large-context bloat sessions');
     });
 
     it('produces escalation for still_recurring retry_churn', async () => {
@@ -243,31 +254,46 @@ describe('trend analysis', () => {
       });
 
       assert.ok(result.nextHypothesis, 'Should produce next hypothesis for retry_churn');
+      assert.ok(result.nextHypothesis.causalBridge, 'Should have a causal bridge');
       assert.ok(
         result.nextHypothesis.likelyIssueClass.includes('retry') || result.nextHypothesis.likelyIssueClass.includes('workflow'),
         `Expected retry/workflow issue class, got: ${result.nextHypothesis.likelyIssueClass}`
       );
     });
 
-    it('produces context-aware escalation for mixed_signals bloat', async () => {
+    it('produces layered escalation for mixed_signals bloat', async () => {
       const { events } = await parseTranscript(join(FIXTURES_DIR, 'sess-006-long-lived.jsonl'));
       const result = validateImpact(events, {
         diagnosisLabels: ['context_bloat'],
       });
 
-      // sess-006 gets mixed_signals — should still get escalation
+      // sess-006 gets mixed_signals — should still get escalation with causal bridge
       assert.ok(result.nextHypothesis, 'mixed_signals should produce escalation guidance');
+      assert.ok(result.nextHypothesis.causalBridge, 'Should explain why first-line was insufficient');
       assert.ok(result.nextHypothesis.nextActions.length >= 2, 'Should have at least 2 next actions');
     });
 
-    it('does not produce escalation for improved sessions', async () => {
-      // Use a session that gets likely_improved (we'll test with a synthetic verdict)
+    it('causal bridge references what improved vs worsened', async () => {
+      const { events } = await parseTranscript(join(FIXTURES_DIR, 'sess-006-long-lived.jsonl'));
+      const result = validateImpact(events, {
+        diagnosisLabels: ['context_bloat'],
+      });
+
+      const bridge = result.nextHypothesis.causalBridge;
+      // Should mention either improvement or worsening
+      assert.ok(
+        bridge.includes('improved') || bridge.includes('worsened') || bridge.includes('flat'),
+        `Causal bridge should reference metric trends, got: ${bridge}`
+      );
+    });
+
+    it('does not produce escalation for improved sessions', () => {
       const verdict = { verdict: 'likely_improved', confidence: 'medium', reason: 'test' };
       const result = computeNextHypothesis(verdict, [], aggregateWindow([]), aggregateWindow([]), ['context_bloat']);
       assert.equal(result, null, 'Should not escalate an improved session');
     });
 
-    it('produces generic escalation when diagnosis is unknown', async () => {
+    it('produces generic escalation with causalBridge for unknown diagnosis', async () => {
       const { events } = await parseTranscript(join(FIXTURES_DIR, 'sess-007-no-improvement.jsonl'));
       const result = validateImpact(events, {
         diagnosisLabels: ['unknown'],
@@ -275,6 +301,7 @@ describe('trend analysis', () => {
 
       if (result.nextHypothesis) {
         assert.ok(result.nextHypothesis.likelyIssueClass, 'Generic escalation should have an issue class');
+        assert.ok(result.nextHypothesis.causalBridge, 'Generic escalation should have a causal bridge');
         assert.ok(result.nextHypothesis.nextActions.length > 0, 'Generic escalation should have actions');
       }
     });

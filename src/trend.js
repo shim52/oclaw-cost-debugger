@@ -515,6 +515,12 @@ const ISSUE_CLASSES = {
  *
  * Only produced for: worse, no_clear_improvement, still_recurring, mixed_signals.
  * Returns null for likely_improved and insufficient_data.
+ *
+ * Returns:
+ *   likelyIssueClass  — the next lever to pull
+ *   structuralRisk     — optional broader pattern (when relevant)
+ *   causalBridge       — why the first-line fix wasn't enough (connects evidence to escalation)
+ *   nextActions        — concrete next steps
  */
 export function computeNextHypothesis(verdict, metrics, baselineAgg, recentAgg, diagnosisLabels = []) {
   const verdictType = verdict.verdict;
@@ -525,6 +531,10 @@ export function computeNextHypothesis(verdict, metrics, baselineAgg, recentAgg, 
   const diagLabels = diagnosisLabels.map(l => typeof l === 'string' ? l : l.label);
   const primaryDiag = diagLabels[0] || 'unknown';
   const byId = new Map(metrics.map(m => [m.id, m]));
+
+  // Collect what improved and what didn't — used for causal bridges
+  const improved = metrics.filter(m => m.trend === 'improved').map(m => m.label);
+  const worsened = metrics.filter(m => m.trend === 'worsened').map(m => m.label);
 
   // Analyze what specifically failed to improve
   const cacheReadTrend = byId.get('avg_cache_read_per_turn')?.trend;
@@ -539,95 +549,86 @@ export function computeNextHypothesis(verdict, metrics, baselineAgg, recentAgg, 
   const cacheReadStillHigh = recentAgg.avgCacheRead > 30000;
   const largeToolResultsPresent = recentAgg.largeToolResultFrequency === 'high' || recentAgg.largeToolResultFrequency === 'medium';
 
-  // ─── context_bloat / stale_scheduled_session ───
-  if (primaryDiag === 'context_bloat' || primaryDiag === 'stale_scheduled_session') {
-    return computeContextBloatEscalation({
-      cacheReadTrend, contextSizeTrend, peakContextTrend, costTrend, slopeTrend,
-      contextStillLarge, cacheReadStillHigh, largeToolResultsPresent,
-      recentAgg, verdictType,
-    });
-  }
-
-  // ─── retry_churn / looping_or_indecision ───
-  if (primaryDiag === 'retry_churn' || primaryDiag === 'looping_or_indecision') {
-    return computeRetryEscalation({
-      retryTrend, errorTrend, costTrend, recentAgg, verdictType,
-    });
-  }
-
-  // ─── tool_failure_cascade ───
-  if (primaryDiag === 'tool_failure_cascade') {
-    return computeToolFailureEscalation({
-      errorTrend, retryTrend, costTrend, recentAgg, verdictType,
-    });
-  }
-
-  // ─── relay_workflow ───
-  if (primaryDiag === 'relay_workflow') {
-    return computeRelayEscalation({
-      cacheReadTrend, contextSizeTrend, costTrend,
-      contextStillLarge, cacheReadStillHigh, recentAgg, verdictType,
-    });
-  }
-
-  // ─── scheduled_workflow ───
-  if (primaryDiag === 'scheduled_workflow') {
-    return computeScheduledEscalation({
-      contextSizeTrend, costTrend, largeToolResultsPresent, recentAgg, verdictType,
-    });
-  }
-
-  // ─── overpowered_simple_task ───
-  if (primaryDiag === 'overpowered_simple_task') {
-    return computeOverpoweredEscalation({
-      costTrend, contextSizeTrend, cacheReadStillHigh, contextStillLarge, recentAgg, verdictType,
-    });
-  }
-
-  // ─── Generic fallback ───
-  return computeGenericEscalation({
-    cacheReadTrend, contextSizeTrend, costTrend, retryTrend,
+  const shared = {
+    cacheReadTrend, contextSizeTrend, peakContextTrend, costTrend, slopeTrend,
+    retryTrend, errorTrend,
     contextStillLarge, cacheReadStillHigh, largeToolResultsPresent,
-    recentAgg, verdictType,
-  });
+    recentAgg, verdictType, improved, worsened,
+  };
+
+  switch (primaryDiag) {
+    case 'context_bloat':
+    case 'stale_scheduled_session':
+      return computeContextBloatEscalation(shared);
+    case 'retry_churn':
+    case 'looping_or_indecision':
+      return computeRetryEscalation(shared);
+    case 'tool_failure_cascade':
+      return computeToolFailureEscalation(shared);
+    case 'relay_workflow':
+      return computeRelayEscalation(shared);
+    case 'scheduled_workflow':
+      return computeScheduledEscalation(shared);
+    case 'overpowered_simple_task':
+      return computeOverpoweredEscalation(shared);
+    default:
+      return computeGenericEscalation(shared);
+  }
+}
+
+/**
+ * Build a causal bridge sentence explaining why first-line fixes weren't enough.
+ */
+function buildCausalBridge(improved, worsened) {
+  if (improved.length > 0 && worsened.length > 0) {
+    return `${improved.join(' and ')} improved, but ${worsened.join(' and ')} still worsened. This suggests the main cost driver is not what the first-line fix targeted.`;
+  }
+  if (worsened.length > 0 && improved.length === 0) {
+    return `${worsened.join(' and ')} worsened with no improvement elsewhere. The first-line fix has not taken effect or does not address the actual cause.`;
+  }
+  if (improved.length === 0 && worsened.length === 0) {
+    return 'Metrics are flat across the board. The first-line fix may not be reaching the part of the session that drives cost.';
+  }
+  return 'Some metrics moved but burden remains unchanged. The first-line fix may be helping a secondary concern while the primary cost driver persists.';
 }
 
 function computeContextBloatEscalation(ctx) {
-  const nextActions = [];
+  const causalBridge = buildCausalBridge(ctx.improved, ctx.worsened);
   let likelyIssueClass;
-  let explanation;
+  let structuralRisk = null;
+  const nextActions = [];
 
-  // Determine the likely deeper issue
   if (ctx.cacheReadStillHigh && ctx.contextStillLarge && ctx.slopeTrend !== 'improved') {
-    // Context keeps growing despite first-line fixes → session architecture
     likelyIssueClass = ISSUE_CLASSES.session_architecture;
-    explanation = 'First-line fixes (reset, compaction, model switch) did not reduce the cost burden. The session is likely mixing unrelated workloads — relays, scheduled tasks, and interactive conversation share the same context, causing it to grow regardless of per-turn optimizations.';
+    structuralRisk = 'long-lived mixed-purpose session — relay, scheduled, and interactive work likely share the same context path';
     nextActions.push(
-      'Isolate relay messages, scheduled jobs, and interactive owner conversation into separate session contexts',
-      'If using a single long-lived owner chat, split it into purpose-specific channels or use per-peer DM isolation',
-      'Force aggressive compaction with a lower token threshold — the current context budget may be too generous',
+      'Isolate relay, scheduled, and interactive workloads into separate session contexts',
+      'If using a single long-lived owner chat, split by purpose or enable per-peer DM isolation',
+      'Force more aggressive compaction — the current threshold may be too generous for this session type',
     );
   } else if (ctx.largeToolResultsPresent) {
-    // Large tool results still entering context → tool payload issue
     likelyIssueClass = ISSUE_CLASSES.tool_payload;
-    explanation = 'Large tool results are still being retained in the session context. Even with resets or compaction, these payloads re-inflate the context on every turn they persist.';
+    structuralRisk = ctx.contextStillLarge
+      ? 'large tool results combined with a long-lived session — payloads accumulate faster than they are pruned'
+      : null;
     nextActions.push(
-      'Enable tool-result TTL pruning so large results are dropped from context after a few turns',
-      'Reduce the verbosity of tool outputs — return summaries instead of full payloads',
-      'If tools return structured data, truncate or paginate the response before it enters the context',
+      'Reduce or summarize large tool outputs before they persist in context',
+      'Shorten retention of heavy tool results — they inflate every subsequent turn',
+      'If possible, return only the data the next step needs rather than full payloads',
     );
   } else if (ctx.cacheReadTrend === 'worsened' || ctx.cacheReadTrend === 'flat') {
-    // Cache-read not improving → context retention
     likelyIssueClass = ISSUE_CLASSES.context_retention;
-    explanation = 'Context is being retained longer than useful. The session may have compaction enabled but with a threshold that is too high, or old conversation turns are not being pruned aggressively enough.';
+    structuralRisk = ctx.contextStillLarge
+      ? 'session may be loading large base context (SOUL.md, memory, tool definitions) on top of conversation history'
+      : null;
     nextActions.push(
-      'Lower the compaction token threshold significantly (e.g., halve the current setting)',
-      'Check whether the session is loading SOUL.md, AGENTS.md, or memory files that inflate the base context',
-      'Consider idle-based session reset for periods of inactivity longer than 30 minutes',
+      'Lower the compaction threshold significantly — old turns are persisting too long',
+      'Audit what enters the base context (agent config, memory, skill definitions) and trim what is not essential',
+      'Consider idle-based session reset for quiet periods longer than 30 minutes',
     );
   } else {
     likelyIssueClass = ISSUE_CLASSES.session_architecture;
-    explanation = 'The bloat pattern persists despite first-line interventions. The root cause is likely structural — this session is doing too much across too many concerns.';
+    structuralRisk = 'session may be serving too many roles — the bloat pattern persists despite per-turn fixes';
     nextActions.push(
       'Audit what kinds of messages flow through this session (relay, cron, interactive, sub-agent)',
       'Separate high-context workloads into dedicated sessions',
@@ -635,39 +636,51 @@ function computeContextBloatEscalation(ctx) {
     );
   }
 
-  return { likelyIssueClass, explanation, nextActions };
+  return { likelyIssueClass, structuralRisk, causalBridge, nextActions };
 }
 
 function computeRetryEscalation(ctx) {
-  const nextActions = [];
-  let likelyIssueClass;
-  let explanation;
+  const causalBridge = buildCausalBridge(ctx.improved, ctx.worsened);
+  let structuralRisk = null;
 
   if (ctx.recentAgg.toolErrorRate > 0.3) {
-    likelyIssueClass = ISSUE_CLASSES.retry_error;
-    explanation = 'The agent is retrying because tools keep failing. This is a tool reliability issue, not a cost optimization issue. Each retry re-sends the full context.';
-    nextActions.push(
-      'Identify which tools are failing and fix the root cause (check logs, permissions, API limits)',
-      'Add circuit-breaker logic so the agent stops retrying after 2-3 failures instead of burning tokens indefinitely',
-      'If a tool is intermittently unreliable, consider disabling it temporarily',
-    );
-  } else {
-    likelyIssueClass = ISSUE_CLASSES.workflow_design;
-    explanation = 'The agent is looping without tool errors — it may be stuck in an indecision cycle where the prompt is ambiguous or the task is under-specified.';
-    nextActions.push(
-      'Review the agent prompt (SOUL.md) for ambiguous instructions that could cause looping',
-      'Add explicit stop conditions or max-turn limits for autonomous agent runs',
-      'Check if the agent is trying to accomplish something beyond its tool capabilities and getting stuck',
-    );
+    if (ctx.contextStillLarge) {
+      structuralRisk = 'each retry re-sends a large context — the retry cost is amplified by context bloat';
+    }
+    return {
+      likelyIssueClass: ISSUE_CLASSES.retry_error,
+      structuralRisk,
+      causalBridge,
+      nextActions: [
+        'Identify which tools are failing and fix the root cause (check logs, permissions, API limits)',
+        'Add circuit-breaker logic — stop retrying after 2-3 failures instead of burning tokens indefinitely',
+        'If a tool is intermittently unreliable, consider disabling it temporarily',
+      ],
+    };
   }
 
-  return { likelyIssueClass, explanation, nextActions };
+  return {
+    likelyIssueClass: ISSUE_CLASSES.workflow_design,
+    structuralRisk: ctx.contextStillLarge
+      ? 'looping in a large-context session compounds cost — each indecision turn re-sends the full history'
+      : null,
+    causalBridge,
+    nextActions: [
+      'Review the agent prompt (SOUL.md) for ambiguous instructions that could cause looping',
+      'Add explicit stop conditions or max-turn limits for autonomous agent runs',
+      'Check if the agent is trying to accomplish something beyond its tool capabilities',
+    ],
+  };
 }
 
 function computeToolFailureEscalation(ctx) {
+  const causalBridge = buildCausalBridge(ctx.improved, ctx.worsened);
   return {
     likelyIssueClass: ISSUE_CLASSES.retry_error,
-    explanation: 'Tool failures are cascading and driving up cost through repeated retries. The agent keeps attempting the same failing operations, re-sending the full context each time.',
+    structuralRisk: ctx.contextStillLarge
+      ? 'failure retries in a large-context session are especially expensive — each attempt re-sends the full history'
+      : null,
+    causalBridge,
     nextActions: [
       'Check tool logs for the specific error — is it a permission issue, API rate limit, or broken endpoint?',
       'Add a failure budget: if a tool fails N times consecutively, skip it and inform the user',
@@ -677,115 +690,128 @@ function computeToolFailureEscalation(ctx) {
 }
 
 function computeRelayEscalation(ctx) {
-  const nextActions = [];
-  let likelyIssueClass;
-  let explanation;
+  const causalBridge = buildCausalBridge(ctx.improved, ctx.worsened);
 
   if (ctx.contextStillLarge || ctx.cacheReadStillHigh) {
-    likelyIssueClass = ISSUE_CLASSES.session_architecture;
-    explanation = 'This looks like more than a simple relay cost issue. The session is carrying a large context, which suggests it is mixing relay forwarding with broader reasoning or carrying over context from non-relay work.';
-    nextActions.push(
-      'Check if this session also handles scheduled tasks, interactive queries, or sub-agent work alongside relay',
-      'Isolate the relay path into a dedicated session with minimal context',
-      'If relays share an owner session, switch to per-peer DM isolation so each contact gets a clean context',
-    );
-  } else {
-    likelyIssueClass = ISSUE_CLASSES.model_choice;
-    explanation = 'Relay cost is still elevated despite the session looking structurally sound. The model may still be more expensive than necessary for forwarding work.';
-    nextActions.push(
-      'Verify the model was actually switched — check the session metadata for the current model',
-      'If already on an economy model, the cost may simply be the baseline for this volume of relay traffic',
-      'Consider reducing relay frequency or batching messages where possible',
-    );
+    return {
+      likelyIssueClass: ISSUE_CLASSES.session_architecture,
+      structuralRisk: 'relay session carrying a large context — likely mixing relay forwarding with broader reasoning or non-relay work',
+      causalBridge,
+      nextActions: [
+        'Check if this session also handles scheduled tasks, interactive queries, or sub-agent work alongside relay',
+        'Isolate the relay path into a dedicated session with minimal context',
+        'If relays share an owner session, switch to per-peer DM isolation so each contact gets a clean context',
+      ],
+    };
   }
 
-  return { likelyIssueClass, explanation, nextActions };
+  return {
+    likelyIssueClass: ISSUE_CLASSES.model_choice,
+    structuralRisk: null,
+    causalBridge,
+    nextActions: [
+      'Verify the model was actually switched — check the session metadata for the current model',
+      'If already on an economy model, this may simply be baseline cost for this relay volume',
+      'Consider whether relay frequency can be reduced or messages batched',
+    ],
+  };
 }
 
 function computeScheduledEscalation(ctx) {
-  const nextActions = [];
-  let likelyIssueClass;
-  let explanation;
+  const causalBridge = buildCausalBridge(ctx.improved, ctx.worsened);
 
   if (ctx.largeToolResultsPresent) {
-    likelyIssueClass = ISSUE_CLASSES.tool_payload;
-    explanation = 'Scheduled jobs are generating large tool results that persist in the session context. Each subsequent run inherits this bloated context.';
-    nextActions.push(
-      'Ensure each scheduled run uses an isolated session (--session isolated) so it starts with a clean context',
-      'Reduce tool output size — return only what the next step needs, not the full payload',
-      'If jobs must share a session, enable aggressive pruning of old tool results between runs',
-    );
-  } else {
-    likelyIssueClass = ISSUE_CLASSES.session_architecture;
-    explanation = 'Scheduled jobs may be reusing a polluted session or targeting the wrong session scope. Context from previous runs or other session work is being carried forward.';
-    nextActions.push(
+    return {
+      likelyIssueClass: ISSUE_CLASSES.tool_payload,
+      structuralRisk: 'scheduled jobs inheriting context from previous runs — each run starts with an already-bloated session',
+      causalBridge,
+      nextActions: [
+        'Ensure each scheduled run uses an isolated session so it starts with a clean context',
+        'Reduce tool output size — return only what the next step needs, not the full payload',
+        'If jobs must share a session, shorten retention of old tool results between runs',
+      ],
+    };
+  }
+
+  return {
+    likelyIssueClass: ISSUE_CLASSES.session_architecture,
+    structuralRisk: 'scheduled jobs may be reusing a polluted session or defaulting to the shared owner session',
+    causalBridge,
+    nextActions: [
       'Verify that each cron job runs in an isolated session, not the shared main session',
       'Check the cron configuration for session targeting — it may be defaulting to the owner session',
       'If the job needs context from previous runs, use memory/storage instead of session context carry-over',
-    );
-  }
-
-  return { likelyIssueClass, explanation, nextActions };
+    ],
+  };
 }
 
 function computeOverpoweredEscalation(ctx) {
-  const nextActions = [];
-  let likelyIssueClass;
-  let explanation;
+  const causalBridge = buildCausalBridge(ctx.improved, ctx.worsened);
 
   if (ctx.contextStillLarge || ctx.cacheReadStillHigh) {
-    likelyIssueClass = ISSUE_CLASSES.context_retention;
-    explanation = 'The task may not be as simple as it appears. A large context is being loaded even for what looks like a simple operation, suggesting the real cost driver is context size rather than model choice.';
-    nextActions.push(
-      'Check what is being loaded into the context — SOUL.md, memory, tool definitions may be inflating it',
-      'Enable a light-context mode for simple tasks that loads only essential bootstrap files',
-      'If the context cannot be reduced, the model switch alone will not be sufficient — context is the main driver',
-    );
-  } else {
-    likelyIssueClass = ISSUE_CLASSES.workflow_design;
-    explanation = 'The model was switched but cost did not drop as expected. The task may be more complex than the heuristic detected, or the agent is doing more work than necessary.';
-    nextActions.push(
+    return {
+      likelyIssueClass: ISSUE_CLASSES.context_retention,
+      structuralRisk: 'the "simple task" is loading a large context — model choice matters less when context is the main cost driver',
+      causalBridge,
+      nextActions: [
+        'Audit what is loaded into context — SOUL.md, memory, tool definitions may inflate it beyond what the task needs',
+        'Enable a light-context mode for simple tasks that loads only essential bootstrap files',
+        'If context cannot be reduced, the real fix is context size, not model tier',
+      ],
+    };
+  }
+
+  return {
+    likelyIssueClass: ISSUE_CLASSES.workflow_design,
+    structuralRisk: null,
+    causalBridge,
+    nextActions: [
       'Review what the agent actually does in these sessions — it may be running unnecessary tool calls',
       'Check if the "simple task" is triggering sub-agent work or multi-step reasoning',
       'If the task truly is simple, verify the model change was applied by checking session metadata',
-    );
-  }
-
-  return { likelyIssueClass, explanation, nextActions };
+    ],
+  };
 }
 
 function computeGenericEscalation(ctx) {
-  const nextActions = [];
-  let likelyIssueClass;
-  let explanation;
+  const causalBridge = buildCausalBridge(ctx.improved, ctx.worsened);
 
   if (ctx.contextStillLarge && ctx.cacheReadStillHigh) {
-    likelyIssueClass = ISSUE_CLASSES.context_retention;
-    explanation = 'The session carries a large context that is not being reduced by first-line fixes. The issue is likely structural — context is being retained across unrelated work.';
-    nextActions.push(
-      'Audit the session to understand what is consuming context (messages, tool results, system prompts)',
-      'Enable compaction with a lower threshold, or switch to isolated sessions for different workloads',
-      'Check if large tool results or memory payloads are inflating the base context',
-    );
-  } else if (ctx.retryTrend !== 'improved' && ctx.recentAgg.retryRate > 0.1) {
-    likelyIssueClass = ISSUE_CLASSES.retry_error;
-    explanation = 'Retry patterns are contributing to cost. Each retry re-sends the full conversation context.';
-    nextActions.push(
-      'Identify which tools are being retried and why they fail',
-      'Add retry limits to prevent unbounded retry loops',
-      'Fix the underlying tool or permission issue causing the failures',
-    );
-  } else {
-    likelyIssueClass = ISSUE_CLASSES.workflow_design;
-    explanation = 'No single clear issue stands out. The cost may be distributed across multiple factors. A deeper audit of this session type is recommended.';
-    nextActions.push(
-      'Run "inspect" to review the full session transcript and identify the costliest turns',
-      'Compare this session against similar sessions that cost less to identify what is different',
-      'Consider whether this session type genuinely needs this level of interaction or could be simplified',
-    );
+    return {
+      likelyIssueClass: ISSUE_CLASSES.context_retention,
+      structuralRisk: 'context may be accumulating across unrelated work within the same session',
+      causalBridge,
+      nextActions: [
+        'Audit what is consuming context — messages, tool results, system prompts, or memory payloads',
+        'Enable compaction with a lower threshold, or switch to isolated sessions for different workloads',
+        'Check if large tool results or memory payloads are inflating the base context',
+      ],
+    };
   }
 
-  return { likelyIssueClass, explanation, nextActions };
+  if (ctx.retryTrend !== 'improved' && ctx.recentAgg.retryRate > 0.1) {
+    return {
+      likelyIssueClass: ISSUE_CLASSES.retry_error,
+      structuralRisk: null,
+      causalBridge,
+      nextActions: [
+        'Identify which tools are being retried and why they fail',
+        'Add retry limits to prevent unbounded retry loops',
+        'Fix the underlying tool or permission issue causing the failures',
+      ],
+    };
+  }
+
+  return {
+    likelyIssueClass: ISSUE_CLASSES.workflow_design,
+    structuralRisk: null,
+    causalBridge,
+    nextActions: [
+      'Run "inspect" to review the full session transcript and identify the costliest turns',
+      'Compare this session against similar sessions that cost less to identify what differs',
+      'Consider whether this session type genuinely needs this level of interaction',
+    ],
+  };
 }
 
 /**

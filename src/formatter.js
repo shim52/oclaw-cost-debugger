@@ -542,8 +542,11 @@ function formatValidationText(sessionId, validation, analysis) {
     lines.push(chalk.bold.white('  Next Hypothesis'));
     lines.push(chalk.dim('  ' + '─'.repeat(66)));
     lines.push(`  Likely issue: ${chalk.yellow.bold(nh.likelyIssueClass)}`);
+    if (nh.structuralRisk) {
+      lines.push(`  Also consider: ${chalk.dim(nh.structuralRisk)}`);
+    }
     lines.push('');
-    lines.push(`  ${nh.explanation}`);
+    lines.push(`  ${chalk.dim('Why:')} ${nh.causalBridge}`);
     lines.push('');
     lines.push(chalk.bold.white('  What to Try Next'));
     for (let i = 0; i < nh.nextActions.length; i++) {
@@ -604,8 +607,11 @@ function formatValidationMarkdown(sessionId, validation, analysis) {
   if (nh) {
     lines.push('## Next Hypothesis');
     lines.push(`**Likely issue:** ${nh.likelyIssueClass}`);
+    if (nh.structuralRisk) {
+      lines.push(`**Also consider:** ${nh.structuralRisk}`);
+    }
     lines.push('');
-    lines.push(`> ${nh.explanation}`);
+    lines.push(`> **Why:** ${nh.causalBridge}`);
     lines.push('');
     lines.push('### What to Try Next');
     for (let i = 0; i < nh.nextActions.length; i++) {
