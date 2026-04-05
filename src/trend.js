@@ -320,6 +320,39 @@ function compareMetric(id, label, baselineVal, recentVal, direction) {
   return { id, label, baselineVal, recentVal, delta, pctChange, trend };
 }
 
+function countRecentTurnsSince(turnMetrics, sinceIso) {
+  if (!sinceIso) return 0;
+  const sinceMs = new Date(sinceIso).getTime();
+  if (!Number.isFinite(sinceMs)) return 0;
+  return turnMetrics.filter(t => {
+    const ts = t.timestamp ? new Date(t.timestamp).getTime() : NaN;
+    return Number.isFinite(ts) && ts >= sinceMs;
+  }).length;
+}
+
+function estimateChangeLag(turnMetrics, options = {}) {
+  const changeDetectedAt = options.changeDetectedAt || null;
+  if (!changeDetectedAt) return null;
+
+  const changeMs = new Date(changeDetectedAt).getTime();
+  if (!Number.isFinite(changeMs)) return null;
+
+  const recentTurnsSinceChange = countRecentTurnsSince(turnMetrics, changeDetectedAt);
+  const lastTurn = turnMetrics[turnMetrics.length - 1];
+  const lastTurnMs = lastTurn?.timestamp ? new Date(lastTurn.timestamp).getTime() : NaN;
+  const hoursSinceChange = Number.isFinite(lastTurnMs)
+    ? (lastTurnMs - changeMs) / (1000 * 60 * 60)
+    : null;
+
+  return {
+    changeDetectedAt,
+    recentTurnsSinceChange,
+    hoursSinceChange,
+    insufficientPostChangeData: recentTurnsSinceChange > 0 && recentTurnsSinceChange < 8,
+    veryRecentChange: hoursSinceChange != null && hoursSinceChange < 24,
+  };
+}
+
 /**
  * Diagnosis-specific metric classification.
  *
@@ -387,12 +420,24 @@ function getMetricProfile(diagnosisLabels) {
  *   - worse             — burden metrics materially worse
  *   - insufficient_data — not enough turns to judge
  */
-export function computeVerdict(metricComparisons, baselineAgg, recentAgg, diagnosisLabels = []) {
+export function computeVerdict(metricComparisons, baselineAgg, recentAgg, diagnosisLabels = [], options = {}) {
   if (baselineAgg.turnCount < 2 || recentAgg.turnCount < 2) {
     return {
       verdict: 'insufficient_data',
       confidence: 'low',
       reason: `Not enough turns to compare (baseline: ${baselineAgg.turnCount}, recent: ${recentAgg.turnCount}).`,
+    };
+  }
+
+  const lag = options.changeLag || null;
+  if (lag && lag.recentTurnsSinceChange > 0 && (lag.insufficientPostChangeData || lag.veryRecentChange)) {
+    const timingBits = [];
+    if (lag.hoursSinceChange != null) timingBits.push(`${lag.hoursSinceChange.toFixed(1)}h since change`);
+    timingBits.push(`${lag.recentTurnsSinceChange} post-change turns`);
+    return {
+      verdict: 'insufficient_data',
+      confidence: 'medium',
+      reason: `Recent config changes may not have had enough time to prove impact yet (${timingBits.join(', ')}).`,
     };
   }
 
@@ -819,28 +864,38 @@ function computeGenericEscalation(ctx) {
  * Takes parsed events and optional diagnosis context, returns a complete validation result.
  */
 export function validateImpact(events, options = {}) {
-  const { strategy = 'auto', diagnosisLabels = [] } = options;
-
   let turnMetrics = computeTurnMetrics(events);
   turnMetrics = markRetries(turnMetrics, events);
 
-  const windows = splitWindows(turnMetrics, strategy);
+  const windows = splitWindows(turnMetrics, options.strategy || 'auto');
   if (!windows) {
     return {
-      verdict: { verdict: 'insufficient_data', confidence: 'low', reason: 'Fewer than 4 assistant turns — not enough data to compare trends.' },
+      verdict: {
+        verdict: 'insufficient_data',
+        confidence: 'low',
+        reason: `Not enough assistant turns (${turnMetrics.length}) to compare windows.`
+      },
       baselineWindow: null,
       recentWindow: null,
       metrics: [],
       strategy: 'none',
       nextHypothesis: null,
+      changeLag: estimateChangeLag(turnMetrics, options),
     };
   }
 
   const baselineAgg = aggregateWindow(windows.baseline);
   const recentAgg = aggregateWindow(windows.recent);
   const metrics = compareWindows(baselineAgg, recentAgg);
-  const verdict = computeVerdict(metrics, baselineAgg, recentAgg, diagnosisLabels);
-  const nextHypothesis = computeNextHypothesis(verdict, metrics, baselineAgg, recentAgg, diagnosisLabels);
+  const changeLag = estimateChangeLag(turnMetrics, options);
+  const verdict = computeVerdict(metrics, baselineAgg, recentAgg, options.diagnosisLabels || [], { changeLag });
+  const nextHypothesis = computeNextHypothesis(
+    verdict,
+    metrics,
+    baselineAgg,
+    recentAgg,
+    options.diagnosisLabels || [],
+  );
 
   return {
     verdict,
@@ -849,5 +904,6 @@ export function validateImpact(events, options = {}) {
     metrics,
     strategy: windows.strategy,
     nextHypothesis,
+    changeLag,
   };
 }

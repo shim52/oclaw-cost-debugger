@@ -42,6 +42,7 @@ export function registerValidate(program) {
         const validation = validateImpact(events, {
           strategy: opts.strategy,
           diagnosisLabels,
+          changeDetectedAt: process.env.OCLAW_COST_CHANGE_DETECTED_AT || null,
         });
 
         console.log(formatValidation(sessionLabel(session), validation, analysis, opts.format));

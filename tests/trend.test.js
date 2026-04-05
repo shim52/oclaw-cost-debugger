@@ -209,6 +209,19 @@ describe('trend analysis', () => {
         assert.equal(result.nextHypothesis, null, 'No next hypothesis for insufficient data');
       }
     });
+
+
+    it('returns insufficient_data when a config change is too recent to validate fairly', async () => {
+      const { events } = await parseTranscript(join(FIXTURES_DIR, 'sess-006-long-lived.jsonl'));
+      const result = validateImpact(events, {
+        diagnosisLabels: ['context_bloat'],
+        changeDetectedAt: new Date().toISOString(),
+      });
+
+      assert.ok(['insufficient_data', 'mixed_signals', 'no_clear_improvement', 'still_recurring', 'worse'].includes(result.verdict.verdict));
+      assert.ok(result.changeLag, 'Should include change-lag metadata');
+      assert.ok(typeof result.verdict.reason === 'string' && result.verdict.reason.length > 0);
+    });
   });
 
   describe('computeNextHypothesis', () => {

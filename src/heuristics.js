@@ -463,12 +463,12 @@ function computeTriage(topLabel, meta, allLabels, events) {
     const isCron = allLabels.some(l => l.label === 'scheduled_workflow' || l.label === 'stale_scheduled_session');
 
     remediations.push({
-      title: isRelay ? 'Reset session after inactivity' : isCron ? 'Reset session between scheduled runs' : 'Reset or rotate long-lived sessions',
+      title: isRelay ? 'Reset session after inactivity' : isCron ? 'Force fresh session per scheduled run' : 'Reset or rotate long-lived sessions',
       why: 'This session has accumulated a large context that gets re-sent with every turn, driving up cost.',
       direction: isRelay
-        ? 'Configure idle-based session reset so relay conversations automatically start fresh after a quiet period.'
+        ? 'Keep idle-based reset at 30m or lower for relay chats, and avoid mixing owner-chat reasoning with pure relay traffic in the same long-lived thread.'
         : isCron
-        ? 'Configure daily or per-run session reset so cron jobs don\'t carry forward stale context.'
+        ? 'Use a truly isolated cron run session with no bound owner-session carry-over, and keep persistent state in memory files instead of session history.'
         : 'Ensure long-lived sessions are periodically reset or compacted to prevent unbounded context growth.',
       status: 'conceptual',
       confidence: 'high',
