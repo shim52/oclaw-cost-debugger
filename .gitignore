@@ -1,5 +1,6 @@
 node_modules/
 sessions/
+docs/
 *.sanitized.jsonl
 *.sample.json
 *.zip

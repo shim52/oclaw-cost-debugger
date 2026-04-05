@@ -18,8 +18,7 @@ describe('inspect --messages integration', () => {
     const totalCost = estimateSessionCostFromEvents(events);
 
     const output = formatMessages(turnMetrics, totalCost, 'text');
-    assert.ok(output.includes('#0'), 'Should have first turn');
-    assert.ok(output.includes('Per-Message Cost Breakdown'), 'Should have header');
+    assert.ok(output.includes('Costliest Messages'), 'Should have header');
     assert.ok(turnMetrics.length > 5, 'sess-006 should have many turns');
   });
 

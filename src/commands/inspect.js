@@ -1,4 +1,4 @@
-import { parseTranscript, getAssistantMessages, getToolResults, computeTotalUsage } from '../parser.js';
+import { parseTranscript, getAssistantMessages, getToolResults, computeTotalUsage, getUserMessages } from '../parser.js';
 import { estimateSessionCostFromEvents } from '../estimator.js';
 import { analyzeSession } from '../heuristics.js';
 import { formatDiagnosis, formatMessages } from '../formatter.js';
@@ -15,7 +15,8 @@ export function registerInspect(program) {
     .option('-f, --format <format>', 'Output format: text, json, markdown', 'text')
     .option('--rank <index>', 'Inspect session by rank (1-based index)')
     .option('--sort <field>', 'Sort field for ranking: tokens, cost, age', 'tokens')
-    .option('-m, --messages', 'Show per-message cost breakdown')
+    .option('-m, --messages', 'Show top costliest messages with insights')
+    .option('--all-messages', 'Show all messages chronologically (use with -m)')
     .action(async (sessionKeyOrId, opts) => {
       try {
         const result = await resolveSession(sessionKeyOrId, opts);
@@ -68,14 +69,38 @@ export function registerInspect(program) {
         console.log(formatDiagnosis(sessionLabel(session), analysis, stats, opts.format));
 
         // Per-message breakdown
-        if (opts.messages) {
+        if (opts.messages || opts.allMessages) {
           let turnMetrics = computeTurnMetrics(events);
           turnMetrics = markRetries(turnMetrics, events);
-          console.log(formatMessages(turnMetrics, finalCost, opts.format));
+          const enriched = enrichTurnsWithContent(turnMetrics, events);
+          console.log(formatMessages(enriched, finalCost, opts.format, { showAll: !!opts.allMessages }));
         }
       } catch (err) {
         console.error(chalk.red(`Error: ${err.message}`));
         process.exit(1);
       }
     });
+}
+
+/**
+ * Enrich turn metrics with message content preview from the original events.
+ * Each turn gets a `preview` string: assistant text snippet, or tool call names.
+ */
+function enrichTurnsWithContent(turnMetrics, events) {
+  const assistantMsgs = getAssistantMessages(events);
+
+  return turnMetrics.map((turn, i) => {
+    const msg = assistantMsgs[i];
+    if (!msg) return { ...turn, preview: '' };
+
+    // Build preview: prefer text content, fall back to tool call names
+    let preview = '';
+    if (msg.textContent && msg.textContent.trim().length > 0) {
+      preview = msg.textContent.trim();
+    } else if (msg.toolCalls && msg.toolCalls.length > 0) {
+      preview = msg.toolCalls.map(tc => tc.name).join(', ');
+    }
+
+    return { ...turn, preview };
+  });
 }

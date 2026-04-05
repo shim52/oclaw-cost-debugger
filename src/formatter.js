@@ -746,104 +746,167 @@ function getVerdictGuidance(verdict, validation, analysis) {
 // ─── Per-Message Cost Breakdown ────────────────────────
 
 /**
- * Format a per-message cost breakdown table.
+ * Format a per-message cost breakdown with insights and content preview.
  *
- * @param {Array} turnMetrics - Array of turn metrics from computeTurnMetrics()
+ * @param {Array} turns - Enriched turn metrics (with `preview` field)
  * @param {number} totalCost - Total cost across all turns
  * @param {string} format - Output format: 'text' | 'json' | 'markdown'
+ * @param {object} opts - { showAll: boolean }
  * @returns {string} Formatted output
  */
-export function formatMessages(turnMetrics, totalCost, format = 'text') {
-  if (turnMetrics.length === 0) {
+export function formatMessages(turns, totalCost, format = 'text', opts = {}) {
+  if (turns.length === 0) {
     return format === 'json'
-      ? JSON.stringify({ totalCost: 0, turns: [] }, null, 2)
+      ? JSON.stringify({ totalCost: 0, turns: [], insights: [] }, null, 2)
       : 'No assistant turns found.';
   }
 
+  const insights = computeCostInsights(turns, totalCost);
+
   switch (format) {
     case 'json':
-      return formatMessagesJson(turnMetrics, totalCost);
+      return formatMessagesJson(turns, totalCost, insights);
     case 'markdown':
-      return formatMessagesMarkdown(turnMetrics, totalCost);
+      return formatMessagesMarkdown(turns, totalCost, insights, opts);
     default:
-      return formatMessagesText(turnMetrics, totalCost);
+      return formatMessagesText(turns, totalCost, insights, opts);
   }
 }
 
-function formatMessagesText(turnMetrics, totalCost) {
-  // Find the costliest turn
-  const maxCost = Math.max(...turnMetrics.map(t => t.cost));
-  const maxCostIndex = turnMetrics.findIndex(t => t.cost === maxCost);
+/**
+ * Compute actionable insights from turn-level cost data.
+ */
+function computeCostInsights(turns, totalCost) {
+  const insights = [];
+  if (turns.length === 0) return insights;
 
-  const lines = [
-    '',
-    chalk.bold.cyan('Per-Message Cost Breakdown'),
-    chalk.dim('─'.repeat(140)),
-  ];
+  const totalInput = turns.reduce((s, t) => s + t.inputTokens, 0);
+  const totalCache = turns.reduce((s, t) => s + t.cacheRead, 0);
+  const totalOutput = turns.reduce((s, t) => s + t.outputTokens, 0);
+  const totalTokens = totalInput + totalCache + totalOutput;
 
-  // Header
-  const header = chalk.bold.white(
-    padRight('#', 6) +
-    padRight('Time', 12) +
-    padRight('Model', 15) +
-    padRight('Cost', 10) +
-    padRight('% Total', 9) +
-    padRight('Input', 9) +
-    padRight('Cache', 9) +
-    padRight('Output', 9) +
-    padRight('Context', 10) +
-    padRight('Tools', 7) +
-    padRight('Errs', 6) +
-    'Flags'
-  );
-  lines.push(header);
-  lines.push(chalk.dim('─'.repeat(140)));
-
-  // Rows
-  for (let i = 0; i < turnMetrics.length; i++) {
-    const t = turnMetrics[i];
-    const pctOfTotal = totalCost > 0 ? (t.cost / totalCost) * 100 : 0;
-
-    // Build flags
-    const flags = [];
-    if (i === maxCostIndex) flags.push('PEAK');
-    if (t.isRetry) flags.push('retry');
-    if (t.toolErrors > 0) flags.push('err');
-    const flagStr = flags.join(', ');
-
-    // Format row
-    const index = padRight(`#${t.index}`, 6);
-    const time = padRight(formatDate(t.timestamp), 12);
-    const model = padRight(truncate(t.model, 13), 15);
-    const cost = padRight(formatCost(t.cost), 10);
-    const pct = padRight(`${pctOfTotal.toFixed(0)}%`, 9);
-    const input = padRight(fmtTokens(t.inputTokens), 9);
-    const cache = padRight(fmtTokens(t.cacheRead), 9);
-    const output = padRight(fmtTokens(t.outputTokens), 9);
-    const context = padRight(fmtTokens(t.contextSize), 10);
-    const tools = padRight(String(t.toolCallCount), 7);
-    const errs = padRight(String(t.toolErrors), 6);
-
-    const isCostliest = i === maxCostIndex && maxCost > 0;
-    const colorFn = isCostliest ? chalk.red.bold : (pctOfTotal > 20 ? chalk.yellow : chalk.white);
-
-    const row = colorFn(
-      index + time + model + cost + pct + input + cache + output + context + tools + errs + flagStr
-    );
-
-    lines.push(row);
+  // Context re-send ratio
+  const contextPct = totalTokens > 0 ? Math.round(((totalInput + totalCache) / totalTokens) * 100) : 0;
+  const outputPct = totalTokens > 0 ? Math.round((totalOutput / totalTokens) * 100) : 0;
+  if (contextPct > 80) {
+    insights.push(`${contextPct}% of tokens are context re-send (input + cache-read), only ${outputPct}% is new output — cost is driven by history size, not by what the model generates.`);
   }
 
-  lines.push(chalk.dim('─'.repeat(140)));
-  lines.push(chalk.bold(`  Total: ${turnMetrics.length} turn(s), ${colorCost(totalCost)} total cost`));
+  // Context growth
+  if (turns.length >= 3) {
+    const firstCtx = turns[0].contextSize;
+    const lastCtx = turns[turns.length - 1].contextSize;
+    if (lastCtx > firstCtx * 3 && lastCtx > 20000) {
+      const growth = (lastCtx / Math.max(firstCtx, 1)).toFixed(1);
+      insights.push(`Context grew ${growth}x during session (${fmtTokens(firstCtx)} to ${fmtTokens(lastCtx)}). Later turns cost much more because the entire history is re-sent.`);
+    }
+  }
+
+  // Cache miss penalty
+  const cacheMissTurns = turns.filter(t => t.cacheRead === 0 && t.inputTokens > 10000);
+  const cachedTurns = turns.filter(t => t.cacheRead > 0 && t.cost > 0);
+  if (cacheMissTurns.length > 0 && cachedTurns.length > 0) {
+    const avgMissCost = cacheMissTurns.reduce((s, t) => s + t.cost, 0) / cacheMissTurns.length;
+    const avgCachedCost = cachedTurns.reduce((s, t) => s + t.cost, 0) / cachedTurns.length;
+    if (avgMissCost > avgCachedCost * 1.3) {
+      const multiplier = (avgMissCost / avgCachedCost).toFixed(1);
+      insights.push(`${cacheMissTurns.length} turn(s) had cache misses (context reloaded from scratch), costing ${multiplier}x more than cached turns (${formatCost(avgMissCost)} vs ${formatCost(avgCachedCost)} avg).`);
+    }
+  }
+
+  // Retry waste
+  const retryTurns = turns.filter(t => t.isRetry);
+  if (retryTurns.length > 0) {
+    const retryWaste = retryTurns.reduce((s, t) => s + t.cost, 0);
+    insights.push(`${retryTurns.length} retry turn(s) wasted ${formatCost(retryWaste)} — same tool calls repeated without progress.`);
+  }
+
+  // Concentration — top 10% of turns
+  if (turns.length >= 10) {
+    const sorted = [...turns].sort((a, b) => b.cost - a.cost);
+    const top10Pct = sorted.slice(0, Math.ceil(turns.length * 0.1));
+    const top10PctCost = top10Pct.reduce((s, t) => s + t.cost, 0);
+    const top10PctShare = totalCost > 0 ? Math.round((top10PctCost / totalCost) * 100) : 0;
+    if (top10PctShare > 30) {
+      insights.push(`Top 10% of turns (${top10Pct.length} turns) account for ${top10PctShare}% of total cost.`);
+    }
+  }
+
+  return insights;
+}
+
+function formatMessagesText(turns, totalCost, insights, opts = {}) {
+  const maxCost = Math.max(...turns.map(t => t.cost));
+  const lines = [''];
+
+  // ─── Insights ───
+  if (insights.length > 0) {
+    lines.push(chalk.bold.cyan('Cost Insights'));
+    lines.push(chalk.dim('─'.repeat(90)));
+    for (const insight of insights) {
+      lines.push(`  ${chalk.yellow('*')} ${insight}`);
+    }
+    lines.push('');
+  }
+
+  // ─── Top costliest turns ───
+  const showAll = opts.showAll;
+  const topN = 10;
+  const sorted = [...turns].sort((a, b) => b.cost - a.cost);
+  const displayed = showAll ? turns : sorted.slice(0, topN);
+  const title = showAll
+    ? `All Messages (${turns.length} turns)`
+    : `Top ${Math.min(topN, turns.length)} Costliest Messages`;
+
+  lines.push(chalk.bold.cyan(title));
+  lines.push(chalk.dim('─'.repeat(90)));
+
+  for (const t of displayed) {
+    const pct = totalCost > 0 ? Math.round((t.cost / totalCost) * 100) : 0;
+    const isCostliest = t.cost === maxCost && maxCost > 0;
+
+    // Flags
+    const flags = [];
+    if (isCostliest) flags.push(chalk.red('PEAK'));
+    if (t.isRetry) flags.push(chalk.magenta('retry'));
+    if (t.toolErrors > 0) flags.push(chalk.red('err'));
+    const flagStr = flags.length > 0 ? '  ' + flags.join(' ') : '';
+
+    // Row 1: cost + metadata
+    const costColor = isCostliest ? chalk.red.bold : (pct > 10 ? chalk.yellow : chalk.white);
+    lines.push(
+      chalk.dim(`  #${padRight(String(t.index), 4)}`) +
+      costColor(formatCost(t.cost)) +
+      chalk.dim(` (${pct}%)`) +
+      `  ${chalk.dim('ctx:')} ${fmtTokens(t.contextSize)}` +
+      `  ${chalk.dim('in:')} ${fmtTokens(t.inputTokens)}` +
+      `  ${chalk.dim('cache:')} ${fmtTokens(t.cacheRead)}` +
+      `  ${chalk.dim('out:')} ${fmtTokens(t.outputTokens)}` +
+      (t.toolCallCount > 0 ? `  ${chalk.dim('tools:')} ${t.toolCallCount}` : '') +
+      flagStr
+    );
+
+    // Row 2: message preview
+    const preview = t.preview || '';
+    if (preview.length > 0) {
+      const previewText = sanitize(preview.replace(/\n/g, ' ').replace(/\s+/g, ' '));
+      lines.push(chalk.dim(`         ${truncate(previewText, 100)}`));
+    }
+  }
+
+  lines.push(chalk.dim('─'.repeat(90)));
+  lines.push(chalk.bold(`  ${turns.length} turn(s) — total: ${colorCost(totalCost)}`));
+  if (!showAll && turns.length > topN) {
+    lines.push(chalk.dim(`  Showing top ${topN} of ${turns.length}. Use --all-messages to see all.`));
+  }
   lines.push('');
 
   return lines.join('\n');
 }
 
-function formatMessagesJson(turnMetrics, totalCost) {
-  const turns = turnMetrics.map(t => {
-    const pctOfTotal = totalCost > 0 ? (t.cost / totalCost) * 100 : 0;
+function formatMessagesJson(turns, totalCost, insights) {
+  const data = turns.map(t => {
+    const pctOfTotal = totalCost > 0 ? Math.round((t.cost / totalCost) * 100) : 0;
     return {
       index: t.index,
       timestamp: t.timestamp,
@@ -857,42 +920,53 @@ function formatMessagesJson(turnMetrics, totalCost) {
       toolCallCount: t.toolCallCount,
       toolErrors: t.toolErrors,
       isRetry: t.isRetry,
+      preview: sanitize(t.preview || ''),
     };
   });
 
-  return JSON.stringify({ totalCost, turns }, null, 2);
+  return JSON.stringify({ totalCost, insights, turns: data }, null, 2);
 }
 
-function formatMessagesMarkdown(turnMetrics, totalCost) {
-  // Find the costliest turn
-  const maxCost = Math.max(...turnMetrics.map(t => t.cost));
-  const maxCostIndex = turnMetrics.findIndex(t => t.cost === maxCost);
+function formatMessagesMarkdown(turns, totalCost, insights, opts = {}) {
+  const maxCost = Math.max(...turns.map(t => t.cost));
+  const lines = ['## Per-Message Cost Breakdown', ''];
 
-  const lines = [
-    '# Per-Message Cost Breakdown',
-    '',
-    '| # | Time | Model | Cost | % Total | Input | Cache | Output | Context | Tools | Errs | Flags |',
-    '|---|------|-------|------|---------|-------|-------|--------|---------|-------|------|-------|',
-  ];
+  if (insights.length > 0) {
+    lines.push('### Insights', '');
+    for (const insight of insights) {
+      lines.push(`- ${insight}`);
+    }
+    lines.push('');
+  }
 
-  for (let i = 0; i < turnMetrics.length; i++) {
-    const t = turnMetrics[i];
-    const pctOfTotal = totalCost > 0 ? (t.cost / totalCost) * 100 : 0;
+  const showAll = opts.showAll;
+  const topN = 10;
+  const sorted = [...turns].sort((a, b) => b.cost - a.cost);
+  const displayed = showAll ? turns : sorted.slice(0, topN);
 
-    // Build flags
+  lines.push(showAll ? '### All Messages' : `### Top ${Math.min(topN, turns.length)} Costliest Messages`);
+  lines.push('');
+  lines.push('| # | Cost | % | Context | Input | Cache | Output | Tools | Flags | Preview |');
+  lines.push('|---|------|---|---------|-------|-------|--------|-------|-------|---------|');
+
+  for (const t of displayed) {
+    const pct = totalCost > 0 ? Math.round((t.cost / totalCost) * 100) : 0;
+    const isCostliest = t.cost === maxCost && maxCost > 0;
     const flags = [];
-    if (i === maxCostIndex) flags.push('**PEAK**');
+    if (isCostliest) flags.push('**PEAK**');
     if (t.isRetry) flags.push('retry');
     if (t.toolErrors > 0) flags.push('err');
-    const flagStr = flags.join(', ');
-
+    const preview = sanitize((t.preview || '').replace(/\n/g, ' ').replace(/\s+/g, ' '));
     lines.push(
-      `| #${t.index} | ${formatDate(t.timestamp)} | ${truncate(t.model, 13)} | ${formatCost(t.cost)} | ${pctOfTotal.toFixed(0)}% | ${fmtTokens(t.inputTokens)} | ${fmtTokens(t.cacheRead)} | ${fmtTokens(t.outputTokens)} | ${fmtTokens(t.contextSize)} | ${t.toolCallCount} | ${t.toolErrors} | ${flagStr} |`
+      `| #${t.index} | ${formatCost(t.cost)} | ${pct}% | ${fmtTokens(t.contextSize)} | ${fmtTokens(t.inputTokens)} | ${fmtTokens(t.cacheRead)} | ${fmtTokens(t.outputTokens)} | ${t.toolCallCount} | ${flags.join(' ')} | ${truncate(preview, 60)} |`
     );
   }
 
   lines.push('');
-  lines.push(`**Total: ${turnMetrics.length} turn(s), ${formatCost(totalCost)} total cost**`);
+  lines.push(`**Total: ${turns.length} turn(s), ${formatCost(totalCost)}**`);
+  if (!showAll && turns.length > topN) {
+    lines.push(`_Showing top ${topN} of ${turns.length}. Use --all-messages to see all._`);
+  }
   lines.push('');
 
   return lines.join('\n');
