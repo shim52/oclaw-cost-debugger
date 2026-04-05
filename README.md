@@ -7,6 +7,10 @@ Runs entirely on your machine. No cloud, no uploads, no write-back.
 ## Install
 
 ```bash
+# Run directly without installing
+npx oclaw-cost-debugger scan --sort cost --path ~/.openclaw/agents/main/sessions
+
+# Or install globally from the repo
 git clone https://github.com/shim52/oclaw-cost-debugger
 cd oclaw-cost-debugger
 npm install
@@ -26,11 +30,16 @@ oclaw-cost-debugger scan --sort cost
 oclaw-cost-debugger inspect 21fd        # by ID prefix
 oclaw-cost-debugger inspect --rank 1 --sort cost   # the most expensive one
 
+# See which of YOUR messages cost the most
+oclaw-cost-debugger inspect --rank 1 --sort cost -m
+
 # Check if a session is getting healthier over time
 oclaw-cost-debugger validate 21fd
 ```
 
 ## Commands
+
+All commands support `-p, --path <path>` to point at a custom sessions directory and `-f, --format <format>` for output format (`text`, `json`, `markdown`).
 
 ### `dashboard` — one-screen overview
 
@@ -40,23 +49,28 @@ Shows total cost, cost breakdown by channel and issue type, top sessions, and qu
 oclaw-cost-debugger dashboard
 oclaw-cost-debugger dashboard --path ./sessions
 oclaw-cost-debugger dashboard --format json
+oclaw-cost-debugger dashboard --include-empty       # include zero-activity sessions
 ```
 
 ### `scan` — find the costliest sessions
 
-Ranks sessions by cost or token usage. Each session gets a heuristic diagnosis and action recommendation.
+Ranks sessions by cost or token usage. Each session gets a heuristic diagnosis and action recommendation. Shows a "Peak Msg" column indicating how much the single costliest user message contributed.
 
 ```bash
 oclaw-cost-debugger scan                              # default top 5 by tokens
-oclaw-cost-debugger scan --sort cost -v               # verbose, sorted by cost
+oclaw-cost-debugger scan --sort cost                  # sort by cost
+oclaw-cost-debugger scan --sort cost -v               # verbose multi-line format
 oclaw-cost-debugger scan -n 10 --sort cost            # top 10 by cost
+oclaw-cost-debugger scan --sort age                   # most recently active
 oclaw-cost-debugger scan --include-empty              # include zero-activity sessions
+oclaw-cost-debugger scan --full-ids                   # show full session IDs
+oclaw-cost-debugger scan --no-diagnose                # skip heuristic diagnosis (faster)
 oclaw-cost-debugger scan --format markdown            # pipe-friendly output
 ```
 
 ### `inspect` — deep-dive into a session
 
-Shows full stats, heuristic diagnosis with evidence, and remediations with confidence levels.
+Shows full stats, heuristic diagnosis with evidence, and remediations with confidence levels and savings estimates.
 
 ```bash
 oclaw-cost-debugger inspect <session-id>              # by full or prefix ID
@@ -70,8 +84,8 @@ Shows which of **your** messages triggered the most expensive agent work. Groups
 
 ```bash
 oclaw-cost-debugger inspect <session-id> -m           # top 10 costliest user messages
-oclaw-cost-debugger inspect <session-id> -m --all-messages  # also show per-turn assistant detail
 oclaw-cost-debugger inspect --rank 1 --sort cost -m   # costliest session, message view
+oclaw-cost-debugger inspect <session-id> -m --all-messages  # also show per-turn assistant detail
 ```
 
 Example output:
@@ -96,9 +110,13 @@ Relay metadata (WhatsApp/Telegram wrappers) and cron prefixes are automatically 
 ### `find` — search and filter sessions
 
 ```bash
-oclaw-cost-debugger find --model gpt-5
-oclaw-cost-debugger find --min-tokens 50000
-oclaw-cost-debugger find --after 2026-03-01
+oclaw-cost-debugger find --model gpt-5               # filter by model name
+oclaw-cost-debugger find --agent main                 # filter by agent ID
+oclaw-cost-debugger find --min-tokens 50000           # minimum total tokens
+oclaw-cost-debugger find --max-tokens 10000           # maximum total tokens
+oclaw-cost-debugger find --after 2026-03-01           # sessions updated after date
+oclaw-cost-debugger find --before 2026-04-01          # sessions updated before date
+oclaw-cost-debugger find --kind direct                # filter by session kind
 ```
 
 ### `validate` — check if a session is getting healthier
@@ -124,7 +142,7 @@ Produces a verdict:
 | `worse` | Burden metrics have materially worsened since the baseline |
 | `insufficient_data` | Not enough turns to compare — check back later |
 
-Each verdict includes confidence level, evidence, and actionable guidance.
+Each verdict includes confidence level, evidence, and actionable guidance. When a remediation hasn't worked, you get a **next hypothesis** suggesting what to try instead.
 
 ### `report` — full diagnostic report
 
@@ -133,6 +151,7 @@ Generates scan + diagnosis for the top N sessions. Useful for saving or sharing.
 ```bash
 oclaw-cost-debugger report --top 5 --format markdown > report.md
 oclaw-cost-debugger report -o report.txt
+oclaw-cost-debugger report --sort cost                 # rank by cost instead of tokens
 ```
 
 ## What it detects
@@ -161,6 +180,10 @@ Each diagnosis includes remediations with:
 - **Savings estimate** — when calculable from your session data
 
 The tool gives you honest guidance. If it can't verify a config option exists in your installation, it says so.
+
+## Output formats
+
+All commands support `--format text` (default), `--format json`, and `--format markdown`. JSON is useful for piping into other tools; markdown is useful for reports and sharing.
 
 ## Privacy
 
