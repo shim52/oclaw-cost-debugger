@@ -7,6 +7,8 @@ Runs entirely on your machine. No cloud, no uploads, no write-back.
 ## Install
 
 ```bash
+git clone https://github.com/shim52/oclaw-cost-debugger
+cd oclaw-cost-debugger
 npm install
 npm link          # makes `oclaw-cost-debugger` available globally
 ```
