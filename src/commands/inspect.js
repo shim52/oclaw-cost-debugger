@@ -130,6 +130,8 @@ function groupCostsByUserMessage(events) {
         toolCallCount: 0,
         toolErrors: 0,
         peakContext: 0,
+        toolNames: [],
+        agentPreview: '',
       };
     } else if (m.role === 'assistant' && current) {
       const usage = m.usage || {};
@@ -142,6 +144,17 @@ function groupCostsByUserMessage(events) {
       current.toolCallCount += m.toolCalls?.length || 0;
       const ctx = (usage.input || 0) + (usage.cacheRead || 0);
       if (ctx > current.peakContext) current.peakContext = ctx;
+
+      // Collect tool names (deduplicated)
+      for (const tc of (m.toolCalls || [])) {
+        if (tc.name && !current.toolNames.includes(tc.name)) {
+          current.toolNames.push(tc.name);
+        }
+      }
+      // Capture first meaningful text snippet as agent preview
+      if (!current.agentPreview && m.textContent && m.textContent.trim().length > 0) {
+        current.agentPreview = m.textContent.trim();
+      }
     }
   }
   if (current) groups.push(current);

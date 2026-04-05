@@ -807,6 +807,19 @@ function formatUserMessagesText(groups, totalCost) {
     if (userText.length > 0) {
       lines.push(chalk.white(`    "${truncate(userText, 100)}"`));
     }
+
+    // Show agent response summary
+    const toolNames = g.toolNames || [];
+    const agentPreview = g.agentPreview || '';
+    if (toolNames.length > 0 || agentPreview.length > 0) {
+      const parts = [];
+      if (toolNames.length > 0) parts.push(toolNames.join(', '));
+      if (agentPreview.length > 0) {
+        const snippet = sanitize(agentPreview.replace(/\n/g, ' ').replace(/\s+/g, ' '));
+        parts.push(truncate(snippet, 90 - (parts[0]?.length || 0)));
+      }
+      lines.push(chalk.dim(`    → ${parts.join(' — ')}`));
+    }
     lines.push('');
   }
 
@@ -834,6 +847,8 @@ function formatUserMessagesJson(groups, totalCost) {
       peakContext: g.peakContext,
       toolCallCount: g.toolCallCount,
       toolErrors: g.toolErrors,
+      toolNames: g.toolNames || [],
+      agentPreview: sanitize(g.agentPreview || ''),
     }));
 
   return JSON.stringify({ totalCost, userMessages: data }, null, 2);
@@ -846,15 +861,18 @@ function formatUserMessagesMarkdown(groups, totalCost) {
 
   const lines = [
     '## Your Costliest Messages', '',
-    '| Cost | % | Turns | Peak Ctx | Tools | Message |',
-    '|------|---|-------|----------|-------|---------|',
+    '| Cost | % | Turns | Peak Ctx | Tools | Message | Agent Response |',
+    '|------|---|-------|----------|-------|---------|----------------|',
   ];
 
   for (const g of displayed) {
     const pct = totalCost > 0 ? Math.round((g.totalCost / totalCost) * 100) : 0;
     const text = sanitize(g.userText.replace(/\n/g, ' ').replace(/\s+/g, ' '));
+    const toolNames = (g.toolNames || []).join(', ');
+    const agentSnippet = sanitize((g.agentPreview || '').replace(/\n/g, ' ').replace(/\s+/g, ' '));
+    const agentCol = toolNames ? `${truncate(toolNames, 30)} — ${truncate(agentSnippet, 40)}` : truncate(agentSnippet, 60);
     lines.push(
-      `| ${formatCost(g.totalCost)} | ${pct}% | ${g.assistantTurns} | ${fmtTokens(g.peakContext)} | ${g.toolCallCount} | ${truncate(text, 80)} |`
+      `| ${formatCost(g.totalCost)} | ${pct}% | ${g.assistantTurns} | ${fmtTokens(g.peakContext)} | ${g.toolCallCount} | ${truncate(text, 60)} | ${agentCol} |`
     );
   }
 
