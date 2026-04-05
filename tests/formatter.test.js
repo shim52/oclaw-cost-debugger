@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { formatMessages, formatScanTable } from '../src/formatter.js';
+import { formatMessages, formatScanTable, formatUserMessages } from '../src/formatter.js';
 
 describe('formatMessages', () => {
   const turns = [
@@ -72,6 +72,49 @@ describe('formatMessages', () => {
     const output = formatMessages(heavyTurns, 1.20, 'text');
     // Should have insight about context re-send ratio (99%+ is context)
     assert.ok(output.includes('context re-send') || output.includes('tokens are context'), 'Should include context insight');
+  });
+});
+
+describe('formatUserMessages', () => {
+  const groups = [
+    { userText: 'Fix the login bug', timestamp: new Date('2026-04-01T10:00:00Z'), totalCost: 0.50, assistantTurns: 3, totalInput: 30000, totalOutput: 500, totalCacheRead: 20000, peakContext: 50000, toolCallCount: 4, toolErrors: 0 },
+    { userText: 'Deploy to staging', timestamp: new Date('2026-04-01T10:05:00Z'), totalCost: 0.10, assistantTurns: 1, totalInput: 5000, totalOutput: 100, totalCacheRead: 3000, peakContext: 8000, toolCallCount: 1, toolErrors: 0 },
+    { userText: 'Refactor the auth module completely', timestamp: new Date('2026-04-01T10:10:00Z'), totalCost: 1.20, assistantTurns: 7, totalInput: 80000, totalOutput: 2000, totalCacheRead: 60000, peakContext: 140000, toolCallCount: 12, toolErrors: 1 },
+  ];
+  const totalCost = 1.80;
+
+  it('shows costliest user messages sorted by cost', () => {
+    const output = formatUserMessages(groups, totalCost, 'text');
+    assert.ok(output.includes('Refactor the auth'), 'Should show costliest message text');
+    assert.ok(output.includes('PEAK'), 'Should flag costliest message');
+    assert.ok(output.includes('67%'), 'Should show percentage for costliest');
+  });
+
+  it('shows user message text in quotes', () => {
+    const output = formatUserMessages(groups, totalCost, 'text');
+    assert.ok(output.includes('"Fix the login bug"'), 'Should quote user text');
+  });
+
+  it('returns valid JSON with userMessages array', () => {
+    const output = formatUserMessages(groups, totalCost, 'json');
+    const parsed = JSON.parse(output);
+    assert.ok(Array.isArray(parsed.userMessages));
+    assert.equal(parsed.userMessages.length, 3);
+    assert.equal(parsed.totalCost, 1.80);
+    // Should be sorted by cost desc
+    assert.ok(parsed.userMessages[0].totalCost > parsed.userMessages[1].totalCost);
+    assert.ok(parsed.userMessages[0].pctOfTotal > 0);
+  });
+
+  it('returns markdown table', () => {
+    const output = formatUserMessages(groups, totalCost, 'markdown');
+    assert.ok(output.includes('|'), 'Should contain table pipes');
+    assert.ok(output.includes('Costliest Messages'), 'Should have header');
+  });
+
+  it('handles empty groups', () => {
+    const output = formatUserMessages([], 0, 'text');
+    assert.ok(output.includes('No user messages'));
   });
 });
 

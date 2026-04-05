@@ -743,6 +743,130 @@ function getVerdictGuidance(verdict, validation, analysis) {
   }
 }
 
+// ─── User-Message Cost Grouping ────────────────────────
+
+/**
+ * Format user-message-centric cost breakdown.
+ * Shows which user messages triggered the most expensive work.
+ *
+ * @param {Array} groups - From groupCostsByUserMessage()
+ * @param {number} totalCost - Total session cost
+ * @param {string} format - 'text' | 'json' | 'markdown'
+ * @returns {string}
+ */
+export function formatUserMessages(groups, totalCost, format = 'text') {
+  if (groups.length === 0) {
+    return format === 'json'
+      ? JSON.stringify({ totalCost: 0, userMessages: [] }, null, 2)
+      : 'No user messages found.';
+  }
+
+  switch (format) {
+    case 'json':
+      return formatUserMessagesJson(groups, totalCost);
+    case 'markdown':
+      return formatUserMessagesMarkdown(groups, totalCost);
+    default:
+      return formatUserMessagesText(groups, totalCost);
+  }
+}
+
+function formatUserMessagesText(groups, totalCost) {
+  const sorted = [...groups].sort((a, b) => b.totalCost - a.totalCost);
+  const maxCost = sorted[0]?.totalCost || 0;
+  const topN = 10;
+  const displayed = sorted.slice(0, topN);
+
+  const lines = [
+    '',
+    chalk.bold.cyan(`Your Costliest Messages (${Math.min(topN, groups.length)} of ${groups.length})`),
+    chalk.dim('─'.repeat(90)),
+    chalk.dim('  Which of YOUR messages triggered the most expensive work?'),
+    '',
+  ];
+
+  for (let i = 0; i < displayed.length; i++) {
+    const g = displayed[i];
+    const pct = totalCost > 0 ? Math.round((g.totalCost / totalCost) * 100) : 0;
+    const isCostliest = g.totalCost === maxCost && maxCost > 0;
+
+    const costColor = isCostliest ? chalk.red.bold : (pct > 10 ? chalk.yellow : chalk.white);
+    const flag = isCostliest ? chalk.red(' PEAK') : '';
+
+    lines.push(
+      `  ${costColor(formatCost(g.totalCost))}` +
+      chalk.dim(` (${pct}%)`) +
+      `  ${chalk.dim('turns:')} ${g.assistantTurns}` +
+      `  ${chalk.dim('ctx:')} ${fmtTokens(g.peakContext)}` +
+      `  ${chalk.dim('tools:')} ${g.toolCallCount}` +
+      flag
+    );
+
+    // Show the user's actual message
+    const userText = sanitize(g.userText.replace(/\n/g, ' ').replace(/\s+/g, ' '));
+    if (userText.length > 0) {
+      lines.push(chalk.white(`    "${truncate(userText, 100)}"`));
+    }
+    lines.push('');
+  }
+
+  lines.push(chalk.dim('─'.repeat(90)));
+  if (groups.length > topN) {
+    lines.push(chalk.dim(`  Showing top ${topN} of ${groups.length} user messages.`));
+  }
+  lines.push('');
+
+  return lines.join('\n');
+}
+
+function formatUserMessagesJson(groups, totalCost) {
+  const data = groups
+    .sort((a, b) => b.totalCost - a.totalCost)
+    .map(g => ({
+      userText: sanitize(g.userText),
+      timestamp: g.timestamp,
+      totalCost: g.totalCost,
+      pctOfTotal: totalCost > 0 ? Math.round((g.totalCost / totalCost) * 100) : 0,
+      assistantTurns: g.assistantTurns,
+      totalInput: g.totalInput,
+      totalOutput: g.totalOutput,
+      totalCacheRead: g.totalCacheRead,
+      peakContext: g.peakContext,
+      toolCallCount: g.toolCallCount,
+      toolErrors: g.toolErrors,
+    }));
+
+  return JSON.stringify({ totalCost, userMessages: data }, null, 2);
+}
+
+function formatUserMessagesMarkdown(groups, totalCost) {
+  const sorted = [...groups].sort((a, b) => b.totalCost - a.totalCost);
+  const topN = 10;
+  const displayed = sorted.slice(0, topN);
+
+  const lines = [
+    '## Your Costliest Messages', '',
+    '| Cost | % | Turns | Peak Ctx | Tools | Message |',
+    '|------|---|-------|----------|-------|---------|',
+  ];
+
+  for (const g of displayed) {
+    const pct = totalCost > 0 ? Math.round((g.totalCost / totalCost) * 100) : 0;
+    const text = sanitize(g.userText.replace(/\n/g, ' ').replace(/\s+/g, ' '));
+    lines.push(
+      `| ${formatCost(g.totalCost)} | ${pct}% | ${g.assistantTurns} | ${fmtTokens(g.peakContext)} | ${g.toolCallCount} | ${truncate(text, 80)} |`
+    );
+  }
+
+  lines.push('');
+  if (groups.length > topN) {
+    lines.push(`_Showing top ${topN} of ${groups.length} user messages._`);
+  }
+  lines.push('');
+
+  return lines.join('\n');
+}
+
 // ─── Per-Message Cost Breakdown ────────────────────────
 
 /**

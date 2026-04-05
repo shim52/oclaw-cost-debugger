@@ -64,6 +64,35 @@ oclaw-cost-debugger inspect --rank 1 --sort cost      # inspect the costliest
 oclaw-cost-debugger inspect --rank 2 --format json    # JSON output for scripting
 ```
 
+#### `inspect -m` — your costliest messages
+
+Shows which of **your** messages triggered the most expensive agent work. Groups all assistant turns by the user message that caused them, sums the cost, and displays your actual text so you can recognize what you asked.
+
+```bash
+oclaw-cost-debugger inspect <session-id> -m           # top 10 costliest user messages
+oclaw-cost-debugger inspect <session-id> -m --all-messages  # also show per-turn assistant detail
+oclaw-cost-debugger inspect --rank 1 --sort cost -m   # costliest session, message view
+```
+
+Example output:
+
+```
+Your Costliest Messages (10 of 86)
+──────────────────────────────────────────────────────────────────────
+  Which of YOUR messages triggered the most expensive work?
+
+  $4.23 (21%)  turns: 7  ctx: 150.5k  tools: 7 PEAK
+    "uploaded a first version to the poc folder as zip, try to use it and see the results"
+
+  $2.78 (14%)  turns: 5  ctx: 142.8k  tools: 7
+    "I like the second idea, I refrain from letting you access my Gmail..."
+
+  $2.69 (13%)  turns: 5  ctx: 140.2k  tools: 6
+    "Approved"
+```
+
+Relay metadata (WhatsApp/Telegram wrappers) and cron prefixes are automatically stripped — you see only what you actually typed.
+
 ### `find` — search and filter sessions
 
 ```bash
