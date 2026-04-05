@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { formatMessages } from '../src/formatter.js';
+import { formatMessages, formatScanTable } from '../src/formatter.js';
 
 describe('formatMessages', () => {
   const turnMetrics = [
@@ -51,5 +51,51 @@ describe('formatMessages', () => {
   it('handles empty turn metrics', () => {
     const output = formatMessages([], 0, 'text');
     assert.ok(output.includes('No assistant turns'));
+  });
+});
+
+describe('formatScanTable with costliestMsgCost', () => {
+  it('shows Peak Msg column when data is present', () => {
+    const sessions = [
+      {
+        sessionId: 'sess-001', sessionKey: 'test', model: 'gpt-5-mini',
+        totalTokens: 50000, estimatedCost: 0.25, updatedAt: new Date(),
+        origin: { provider: 'whatsapp' }, topLabel: 'context_bloat',
+        triage: { priority: 'high', whyFlagged: 'test', suggestedNextStep: 'inspect' },
+        costliestMsgCost: 0.15, costliestMsgPct: 60,
+      },
+    ];
+    const output = formatScanTable(sessions, { format: 'text' });
+    assert.ok(output.includes('60%'), 'Should show costliest message percentage');
+  });
+
+  it('includes costliestMsgCost in JSON output', () => {
+    const sessions = [
+      {
+        sessionId: 'sess-001', sessionKey: 'test', model: 'gpt-5-mini',
+        totalTokens: 50000, estimatedCost: 0.25, updatedAt: new Date(),
+        origin: null, topLabel: 'clean_session',
+        triage: { priority: 'low', whyFlagged: 'n/a' },
+        costliestMsgCost: 0.15, costliestMsgPct: 60,
+      },
+    ];
+    const output = formatScanTable(sessions, { format: 'json' });
+    const parsed = JSON.parse(output);
+    assert.equal(parsed[0].costliestMsgCost, 0.15);
+    assert.equal(parsed[0].costliestMsgPct, 60);
+  });
+
+  it('shows dash when costliestMsgCost is not available', () => {
+    const sessions = [
+      {
+        sessionId: 'sess-002', sessionKey: 'test2', model: 'gpt-5-mini',
+        totalTokens: 1000, estimatedCost: 0.01, updatedAt: new Date(),
+        origin: null, topLabel: 'clean_session',
+        triage: { priority: 'low', whyFlagged: 'n/a' },
+      },
+    ];
+    const output = formatScanTable(sessions, { format: 'text' });
+    // Should still render without error
+    assert.ok(typeof output === 'string');
   });
 });

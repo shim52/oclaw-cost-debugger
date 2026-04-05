@@ -43,7 +43,12 @@ export function formatScanTable(sessions, options = {}) {
 }
 
 function sanitizeScanResult(s) {
-  return { ...s, sessionKey: sanitizeSessionKey(s.sessionKey) };
+  return {
+    ...s,
+    sessionKey: sanitizeSessionKey(s.sessionKey),
+    costliestMsgCost: s.costliestMsgCost,
+    costliestMsgPct: s.costliestMsgPct,
+  };
 }
 
 function formatCost(cost) {
@@ -109,10 +114,14 @@ function formatScanText(sessions, opts = {}) {
         const triage = s.triage || {};
         const origin = s.origin;
         const originLabel = origin ? `${origin.provider || ''}${origin.surface ? '/' + origin.surface : ''}` : '-';
+        const peakMsgLine = s.costliestMsgCost != null
+          ? `   Peak msg: ${colorCost(s.costliestMsgCost)} (${s.costliestMsgPct}% of total)`
+          : null;
         return [
           `${chalk.dim(`#${i + 1}`)} ${chalk.bold.white(truncate(s.sessionId, 36))}  ${colorCost(s.estimatedCost)}`,
           `   Model: ${chalk.yellow(s.model)}  Tokens: ${chalk.cyan(s.totalTokens.toLocaleString())}  Duration: ${formatDuration(s.runtimeMs)}`,
           `   Origin: ${originLabel}  Cache: ${(s.cacheRead || 0).toLocaleString()} read`,
+          peakMsgLine,
           `   Diagnosis: ${colorLabel(s.topLabel || 'unknown')} — ${triage.whyFlagged || 'N/A'}`,
           triage.suggestedNextStep === 'inspect' || triage.suggestedNextStep === 'review remediations'
             ? `   ${chalk.green('→')} ${triage.whyFlagged}`
@@ -137,12 +146,13 @@ function formatScanText(sessions, opts = {}) {
     padRight('Date', 12) +
     padRight('Model', 14) +
     padRight('Cost', 10) +
+    padRight('Peak Msg', 16) +
     padRight('Tokens', 9) +
     padRight('Diagnosis', 24) +
     padRight('Action', 28)
   );
 
-  const divider = chalk.dim('─'.repeat(fullIds ? 164 : 134));
+  const divider = chalk.dim('─'.repeat(fullIds ? 180 : 150));
 
   const rows = sessions.map((s, i) => {
     const triage = s.triage || {};
@@ -156,6 +166,12 @@ function formatScanText(sessions, opts = {}) {
     const model = padRight(truncate(s.model, 12), 14);
     const cost = padRight(formatCost(s.estimatedCost), 10);
     const coloredCost = cost.replace(formatCost(s.estimatedCost), colorCost(s.estimatedCost));
+
+    const peakMsg = s.costliestMsgCost != null
+      ? `${formatCost(s.costliestMsgCost)} (${s.costliestMsgPct}%)`
+      : '-';
+    const peakMsgCol = padRight(peakMsg, 16);
+
     const tokens = padRight(s.totalTokens >= 1000 ? Math.round(s.totalTokens / 1000) + 'k' : String(s.totalTokens), 9);
 
     const rawDiag = truncate(s.topLabel || 'unknown', 22);
@@ -166,7 +182,7 @@ function formatScanText(sessions, opts = {}) {
       ? chalk.green('inspect — ' + truncate(triage.whyFlagged || '', 16))
       : chalk.dim(truncate(triage.whyFlagged || 'n/a', 26));
 
-    return `${chalk.dim(rank)}${sid}${chalk.cyan(originCol)}${chalk.dim(dateCol)}${model}${coloredCost}${tokens}${diag}${action}`;
+    return `${chalk.dim(rank)}${sid}${chalk.cyan(originCol)}${chalk.dim(dateCol)}${model}${coloredCost}${peakMsgCol}${tokens}${diag}${action}`;
   });
 
   return [
@@ -186,14 +202,17 @@ function formatScanMarkdown(sessions) {
   if (sessions.length === 0) return '_No sessions found._';
 
   const totalCost = sessions.reduce((sum, s) => sum + (s.estimatedCost || 0), 0);
-  const header = '| # | Session ID | Origin | Date | Model | Cost | Tokens | Diagnosis | Action |';
-  const divider = '|---|------------|--------|------|-------|------|--------|-----------|--------|';
+  const header = '| # | Session ID | Origin | Date | Model | Cost | Peak Msg | Tokens | Diagnosis | Action |';
+  const divider = '|---|------------|--------|------|-------|------|----------|--------|-----------|--------|';
 
   const rows = sessions.map((s, i) => {
     const triage = s.triage || {};
     const origin = s.origin ? (s.origin.provider || '-') : '-';
     const date = formatDate(s.updatedAt);
-    return `| ${i + 1} | \`${truncate(s.sessionId, 22)}\` | ${origin} | ${date} | ${s.model} | ${formatCost(s.estimatedCost)} | ${s.totalTokens.toLocaleString()} | ${s.topLabel || 'unknown'} | ${triage.suggestedNextStep === 'inspect' ? '**inspect**' : triage.whyFlagged || '-'} |`;
+    const peakMsg = s.costliestMsgCost != null
+      ? `${formatCost(s.costliestMsgCost)} (${s.costliestMsgPct}%)`
+      : '-';
+    return `| ${i + 1} | \`${truncate(s.sessionId, 22)}\` | ${origin} | ${date} | ${s.model} | ${formatCost(s.estimatedCost)} | ${peakMsg} | ${s.totalTokens.toLocaleString()} | ${s.topLabel || 'unknown'} | ${triage.suggestedNextStep === 'inspect' ? '**inspect**' : triage.whyFlagged || '-'} |`;
   });
 
   return ['# Session Scan Results', '', header, divider, ...rows, '', `**Total: ${formatCost(totalCost)}**`, ''].join('\n');

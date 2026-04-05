@@ -3,6 +3,7 @@ import { parseTranscript, getAssistantMessages, getToolResults } from '../parser
 import { estimateSessionCostFromMeta, estimateSessionCostFromEvents } from '../estimator.js';
 import { analyzeSession } from '../heuristics.js';
 import { formatScanTable } from '../formatter.js';
+import { computeTurnMetrics } from '../trend.js';
 import chalk from 'chalk';
 
 export function registerScan(program) {
@@ -72,13 +73,15 @@ export function registerScan(program) {
         const top = parseInt(opts.top, 10) || 5;
         results = results.slice(0, top);
 
-        // Optionally run heuristic diagnosis on top sessions
+        // Parse transcripts once, reuse for diagnosis and costliest turn
+        const parsedEventsMap = new Map();
+
         if (opts.diagnose !== false) {
           for (const r of results) {
             if (r.transcriptPath) {
               try {
                 const { events } = await parseTranscript(r.transcriptPath);
-                // We need to look up the original session meta
+                parsedEventsMap.set(r.sessionId, events);
                 const sessionMeta = sessions.find(s => s.sessionId === r.sessionId)?.meta || {};
                 const analysis = analyzeSession(events, sessionMeta);
                 r.topLabel = analysis.labels[0]?.label || 'clean_session';
@@ -94,6 +97,27 @@ export function registerScan(program) {
               whyFlagged: 'diagnosis skipped (--no-diagnose)',
               suggestedNextStep: 'remove --no-diagnose flag to view'
             };
+          }
+        }
+
+        // Compute costliest turn for each session
+        for (const r of results) {
+          if (r.transcriptPath) {
+            try {
+              let events = parsedEventsMap.get(r.sessionId);
+              if (!events) {
+                const parsed = await parseTranscript(r.transcriptPath);
+                events = parsed.events;
+              }
+              const turnMetrics = computeTurnMetrics(events);
+              if (turnMetrics.length > 0) {
+                const maxTurn = turnMetrics.reduce((a, b) => a.cost > b.cost ? a : b);
+                r.costliestMsgCost = maxTurn.cost;
+                r.costliestMsgPct = r.estimatedCost > 0
+                  ? Math.round((maxTurn.cost / r.estimatedCost) * 100)
+                  : 0;
+              }
+            } catch { /* skip */ }
           }
         }
 
