@@ -1,8 +1,9 @@
 import { parseTranscript, getAssistantMessages, getToolResults, computeTotalUsage } from '../parser.js';
 import { estimateSessionCostFromEvents } from '../estimator.js';
 import { analyzeSession } from '../heuristics.js';
-import { formatDiagnosis } from '../formatter.js';
+import { formatDiagnosis, formatMessages } from '../formatter.js';
 import { resolveSession, sessionLabel } from '../resolve-session.js';
+import { computeTurnMetrics, markRetries } from '../trend.js';
 import chalk from 'chalk';
 
 export function registerInspect(program) {
@@ -14,6 +15,7 @@ export function registerInspect(program) {
     .option('-f, --format <format>', 'Output format: text, json, markdown', 'text')
     .option('--rank <index>', 'Inspect session by rank (1-based index)')
     .option('--sort <field>', 'Sort field for ranking: tokens, cost, age', 'tokens')
+    .option('-m, --messages', 'Show per-message cost breakdown')
     .action(async (sessionKeyOrId, opts) => {
       try {
         const result = await resolveSession(sessionKeyOrId, opts);
@@ -64,6 +66,13 @@ export function registerInspect(program) {
         const analysis = analyzeSession(events, session.meta);
 
         console.log(formatDiagnosis(sessionLabel(session), analysis, stats, opts.format));
+
+        // Per-message breakdown
+        if (opts.messages) {
+          let turnMetrics = computeTurnMetrics(events);
+          turnMetrics = markRetries(turnMetrics, events);
+          console.log(formatMessages(turnMetrics, finalCost, opts.format));
+        }
       } catch (err) {
         console.error(chalk.red(`Error: ${err.message}`));
         process.exit(1);
