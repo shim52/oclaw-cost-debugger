@@ -682,6 +682,12 @@ function fmtPct(rate) {
   return `${(rate * 100).toFixed(0)}%`;
 }
 
+function fmtTokens(tokens) {
+  if (tokens >= 1_000_000) return `${(tokens / 1_000_000).toFixed(1)}M`;
+  if (tokens >= 1_000) return `${(tokens / 1_000).toFixed(1)}k`;
+  return String(tokens);
+}
+
 function getVerdictGuidance(verdict, validation, analysis) {
   const topLabel = analysis?.labels?.[0]?.label;
 
@@ -716,4 +722,159 @@ function getVerdictGuidance(verdict, validation, analysis) {
     default:
       return '';
   }
+}
+
+// ─── Per-Message Cost Breakdown ────────────────────────
+
+/**
+ * Format a per-message cost breakdown table.
+ *
+ * @param {Array} turnMetrics - Array of turn metrics from computeTurnMetrics()
+ * @param {number} totalCost - Total cost across all turns
+ * @param {string} format - Output format: 'text' | 'json' | 'markdown'
+ * @returns {string} Formatted output
+ */
+export function formatMessages(turnMetrics, totalCost, format = 'text') {
+  if (turnMetrics.length === 0) {
+    return format === 'json'
+      ? JSON.stringify({ totalCost: 0, turns: [] }, null, 2)
+      : 'No assistant turns found.';
+  }
+
+  switch (format) {
+    case 'json':
+      return formatMessagesJson(turnMetrics, totalCost);
+    case 'markdown':
+      return formatMessagesMarkdown(turnMetrics, totalCost);
+    default:
+      return formatMessagesText(turnMetrics, totalCost);
+  }
+}
+
+function formatMessagesText(turnMetrics, totalCost) {
+  // Find the costliest turn
+  const maxCost = Math.max(...turnMetrics.map(t => t.cost));
+  const maxCostIndex = turnMetrics.findIndex(t => t.cost === maxCost);
+
+  const lines = [
+    '',
+    chalk.bold.cyan('Per-Message Cost Breakdown'),
+    chalk.dim('─'.repeat(140)),
+  ];
+
+  // Header
+  const header = chalk.bold.white(
+    padRight('#', 6) +
+    padRight('Time', 12) +
+    padRight('Model', 15) +
+    padRight('Cost', 10) +
+    padRight('% Total', 9) +
+    padRight('Input', 9) +
+    padRight('Cache', 9) +
+    padRight('Output', 9) +
+    padRight('Context', 10) +
+    padRight('Tools', 7) +
+    padRight('Errs', 6) +
+    'Flags'
+  );
+  lines.push(header);
+  lines.push(chalk.dim('─'.repeat(140)));
+
+  // Rows
+  for (let i = 0; i < turnMetrics.length; i++) {
+    const t = turnMetrics[i];
+    const pctOfTotal = totalCost > 0 ? (t.cost / totalCost) * 100 : 0;
+
+    // Build flags
+    const flags = [];
+    if (i === maxCostIndex) flags.push('PEAK');
+    if (t.isRetry) flags.push('retry');
+    if (t.toolErrors > 0) flags.push('err');
+    const flagStr = flags.join(', ');
+
+    // Format row
+    const index = padRight(`#${t.index}`, 6);
+    const time = padRight(formatDate(t.timestamp), 12);
+    const model = padRight(truncate(t.model, 13), 15);
+    const cost = padRight(formatCost(t.cost), 10);
+    const pct = padRight(`${pctOfTotal.toFixed(0)}%`, 9);
+    const input = padRight(fmtTokens(t.inputTokens), 9);
+    const cache = padRight(fmtTokens(t.cacheRead), 9);
+    const output = padRight(fmtTokens(t.outputTokens), 9);
+    const context = padRight(fmtTokens(t.contextSize), 10);
+    const tools = padRight(String(t.toolCallCount), 7);
+    const errs = padRight(String(t.toolErrors), 6);
+
+    const isCostliest = i === maxCostIndex && maxCost > 0;
+    const colorFn = isCostliest ? chalk.red.bold : (pctOfTotal > 20 ? chalk.yellow : chalk.white);
+
+    const row = colorFn(
+      index + time + model + cost + pct + input + cache + output + context + tools + errs + flagStr
+    );
+
+    lines.push(row);
+  }
+
+  lines.push(chalk.dim('─'.repeat(140)));
+  lines.push(chalk.bold(`  Total: ${turnMetrics.length} turn(s), ${colorCost(totalCost)} total cost`));
+  lines.push('');
+
+  return lines.join('\n');
+}
+
+function formatMessagesJson(turnMetrics, totalCost) {
+  const turns = turnMetrics.map(t => {
+    const pctOfTotal = totalCost > 0 ? (t.cost / totalCost) * 100 : 0;
+    return {
+      index: t.index,
+      timestamp: t.timestamp,
+      model: t.model,
+      cost: t.cost,
+      pctOfTotal,
+      inputTokens: t.inputTokens,
+      outputTokens: t.outputTokens,
+      cacheRead: t.cacheRead,
+      contextSize: t.contextSize,
+      toolCallCount: t.toolCallCount,
+      toolErrors: t.toolErrors,
+      isRetry: t.isRetry,
+    };
+  });
+
+  return JSON.stringify({ totalCost, turns }, null, 2);
+}
+
+function formatMessagesMarkdown(turnMetrics, totalCost) {
+  // Find the costliest turn
+  const maxCost = Math.max(...turnMetrics.map(t => t.cost));
+  const maxCostIndex = turnMetrics.findIndex(t => t.cost === maxCost);
+
+  const lines = [
+    '# Per-Message Cost Breakdown',
+    '',
+    '| # | Time | Model | Cost | % Total | Input | Cache | Output | Context | Tools | Errs | Flags |',
+    '|---|------|-------|------|---------|-------|-------|--------|---------|-------|------|-------|',
+  ];
+
+  for (let i = 0; i < turnMetrics.length; i++) {
+    const t = turnMetrics[i];
+    const pctOfTotal = totalCost > 0 ? (t.cost / totalCost) * 100 : 0;
+
+    // Build flags
+    const flags = [];
+    if (i === maxCostIndex) flags.push('**PEAK**');
+    if (t.isRetry) flags.push('retry');
+    if (t.toolErrors > 0) flags.push('err');
+    const flagStr = flags.join(', ');
+
+    lines.push(
+      `| #${t.index} | ${formatDate(t.timestamp)} | ${truncate(t.model, 13)} | ${formatCost(t.cost)} | ${pctOfTotal.toFixed(0)}% | ${fmtTokens(t.inputTokens)} | ${fmtTokens(t.cacheRead)} | ${fmtTokens(t.outputTokens)} | ${fmtTokens(t.contextSize)} | ${t.toolCallCount} | ${t.toolErrors} | ${flagStr} |`
+    );
+  }
+
+  lines.push('');
+  lines.push(`**Total: ${turnMetrics.length} turn(s), ${formatCost(totalCost)} total cost**`);
+  lines.push('');
+
+  return lines.join('\n');
 }
